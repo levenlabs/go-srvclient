@@ -1,4 +1,4 @@
-# go-skysrv
+# go-srvclient
 
 A simple package for resolving SRV records being served by
 [skydns](https://github.com/skynetservices/skydns), according to the algorithm
@@ -9,17 +9,17 @@ weighted random choice of one of them, returning a string which is the
 
 ## Install
 
-    go get github.com/levenlabs/go-skysrv
+    go get github.com/levenlabs/go-srvclient
 
 ## Example
 
 ```go
 package main
 
-import "github.com/levenlabs/go-skysrv"
+import "github.com/levenlabs/go-srvclient"
 
 func main() {
-	addr, err := skysrv.SRV("foo.skydns.local")
+	addr, err := srvclient.SRV("foo.skydns.local")
 	if err != nil {
 		fmt.Fatal(err)
 	}

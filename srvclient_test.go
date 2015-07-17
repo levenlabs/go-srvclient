@@ -1,4 +1,4 @@
-package skysrv
+package srvclient
 
 import (
 	"net"
