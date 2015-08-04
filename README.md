@@ -27,3 +27,15 @@ func main() {
 	log.Printf("%s was chosen!", addr)
 }
 ```
+
+## Binary client
+
+This project also has an installable binary client which can be easily used. It
+can be installed with:
+
+    go get github.com/levenlabs/go-srvclient/srvclient
+
+And used like so:
+
+    # srvclient some.host.name
+    8.9.10.11:1213
