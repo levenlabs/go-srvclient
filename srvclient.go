@@ -11,8 +11,18 @@ import (
 // SRV will perform a SRV request on the given hostname, and then choose one of
 // the returned entries randomly based on the priority and weight fields it
 // sees. It will return the address ("host:port") of the winning entry, or an
-// error if the query couldn't be made or it returned no entries
+// error if the query couldn't be made or it returned no entries.
+//
+// If the given hostname already has a ":port" appended to it, only the ip will
+// be looked up from the SRV request, but the port given will be returned
 func SRV(hostname string) (string, error) {
+
+	var portStr string
+	if parts := strings.Split(hostname, ":"); len(parts) == 2 {
+		hostname = parts[0]
+		portStr = parts[1]
+	}
+
 	_, srvs, err := net.LookupSRV("", "", hostname)
 	if err != nil {
 		return "", err
@@ -23,7 +33,13 @@ func SRV(hostname string) (string, error) {
 	}
 
 	srv := pickSRV(srvs)
-	addr := srv.Target + ":" + strconv.Itoa(int(srv.Port))
+
+	// Only use the returned port if one wasn't supplied in the hostname
+	if portStr == "" {
+		portStr = strconv.Itoa(int(srv.Port))
+	}
+
+	addr := srv.Target + ":" + portStr
 	return addr, nil
 }
 
