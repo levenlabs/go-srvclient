@@ -1,12 +1,48 @@
 package srvclient
 
+// At the moment go's dns resolver which is built into the net package doesn't
+// properly handle the case of a response being too big. Which leads us to
+// having to manually parse /etc/resolv.conf and manually make the SRV requests.
+
 import (
+	"errors"
 	"fmt"
 	"math/rand"
-	"net"
 	"strconv"
 	"strings"
+	"time"
+
+	"github.com/miekg/dns"
 )
+
+func lookupSRV(hostname string) (*dns.Msg, error) {
+	cfg, err := dnsReadConfig("/etc/resolv.conf")
+	if err != nil {
+		return nil, fmt.Errorf("Could not parse /etc/resolv.conf: %s", err)
+	}
+
+	c := new(dns.Client)
+	c.UDPSize = dns.DefaultMsgSize
+	if cfg.timeout > 0 {
+		timeout := time.Duration(cfg.timeout) * time.Second
+		c.DialTimeout = timeout
+		c.ReadTimeout = timeout
+		c.WriteTimeout = timeout
+	}
+	m := new(dns.Msg)
+	m.SetQuestion(dns.Fqdn(hostname), dns.TypeSRV)
+	m.SetEdns0(dns.DefaultMsgSize, false)
+
+	for _, server := range cfg.servers {
+		res, _, err := c.Exchange(m, server+":53")
+		if err != nil {
+			continue
+		}
+		return res, nil
+	}
+
+	return nil, errors.New("no available nameservers")
+}
 
 // SRV will perform a SRV request on the given hostname, and then choose one of
 // the returned entries randomly based on the priority and weight fields it
@@ -23,16 +59,23 @@ func SRV(hostname string) (string, error) {
 		portStr = parts[1]
 	}
 
-	_, srvs, err := net.LookupSRV("", "", hostname)
+	res, err := lookupSRV(hostname)
 	if err != nil {
 		return "", err
 	}
 
-	if len(srvs) == 0 {
+	if len(res.Answer) == 0 {
 		return "", fmt.Errorf("No SRV records for %q", hostname)
 	}
 
-	srv := pickSRV(srvs)
+	ans := make([]*dns.SRV, len(res.Answer))
+	for i := range res.Answer {
+		if ansSRV, ok := res.Answer[i].(*dns.SRV); ok {
+			ans[i] = ansSRV
+		}
+	}
+
+	srv := pickSRV(ans)
 
 	// Only use the returned port if one wasn't supplied in the hostname
 	if portStr == "" {
@@ -54,9 +97,12 @@ func SRVNoPort(hostname string) (string, error) {
 	return addr[:strings.Index(addr, ":")], nil
 }
 
-func pickSRV(srvs []*net.SRV) *net.SRV {
+func pickSRV(srvs []*dns.SRV) *dns.SRV {
+	randSrc := rand.NewSource(time.Now().UnixNano())
+	rand := rand.New(randSrc)
+
 	lowPrio := srvs[0].Priority
-	picks := make([]*net.SRV, 0, len(srvs))
+	picks := make([]*dns.SRV, 0, len(srvs))
 	weights := make([]int, 0, len(srvs))
 
 	for i := range srvs {
