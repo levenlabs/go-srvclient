@@ -1,15 +1,15 @@
 package srvclient
 
 import (
-	"net"
 	. "testing"
 
+	"github.com/miekg/dns"
 	"github.com/stretchr/testify/assert"
 )
 
-func testDistr(srvs []*net.SRV) map[string]int {
+func testDistr(srvs []*dns.SRV) map[string]int {
 	m := map[string]int{}
-	for i := 0; i < 100000; i++ {
+	for i := 0; i < 1000; i++ {
 		s := pickSRV(srvs)
 		m[s.Target]++
 	}
@@ -17,7 +17,7 @@ func testDistr(srvs []*net.SRV) map[string]int {
 }
 
 func TestPickSRV(t *T) {
-	srvs := []*net.SRV{
+	srvs := []*dns.SRV{
 		{Target: "a", Priority: 1, Weight: 100},
 		{Target: "b", Priority: 1, Weight: 100},
 	}
@@ -27,7 +27,7 @@ func TestPickSRV(t *T) {
 	assert.True(t, m["a"] > 0)
 	assert.True(t, m["b"] > 0)
 
-	srvs = []*net.SRV{
+	srvs = []*dns.SRV{
 		{Target: "a", Priority: 2, Weight: 100},
 		{Target: "b", Priority: 1, Weight: 100},
 		{Target: "c", Priority: 2, Weight: 100},
@@ -39,7 +39,7 @@ func TestPickSRV(t *T) {
 	assert.True(t, m["b"] > 0)
 	assert.True(t, m["d"] > 0)
 
-	srvs = []*net.SRV{
+	srvs = []*dns.SRV{
 		{Target: "a", Priority: 2, Weight: 100},
 		{Target: "b", Priority: 1, Weight: 50},
 		{Target: "c", Priority: 2, Weight: 100},
