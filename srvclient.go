@@ -33,8 +33,9 @@ func lookupSRV(hostname string) (*dns.Msg, error) {
 		c.ReadTimeout = timeout
 		c.WriteTimeout = timeout
 	}
+	fqdn := dns.Fqdn(hostname)
 	m := new(dns.Msg)
-	m.SetQuestion(dns.Fqdn(hostname), dns.TypeSRV)
+	m.SetQuestion(fqdn, dns.TypeSRV)
 	m.SetEdns0(dns.DefaultMsgSize, false)
 
 	for _, server := range cfg.servers {
@@ -42,7 +43,18 @@ func lookupSRV(hostname string) (*dns.Msg, error) {
 		if err != nil {
 			continue
 		}
-		return res, nil
+		if res.Rcode != dns.RcodeFormatError {
+			return res, nil
+		}
+
+		// At this point we got a response, but it was just to tell us that
+		// edns0 isn't supported, so we try again without it
+		m2 := new(dns.Msg)
+		m2.SetQuestion(fqdn, dns.TypeSRV)
+		res, _, err = c.Exchange(m2, server+":53")
+		if err == nil {
+			return res, nil
+		}
 	}
 
 	return nil, errors.New("no available nameservers")
