@@ -15,10 +15,14 @@ import (
 	"github.com/miekg/dns"
 )
 
+func init() {
+	go dnsConfigLoop()
+}
+
 func lookupSRV(hostname string) (*dns.Msg, error) {
-	cfg, err := dnsReadConfig("/etc/resolv.conf")
+	cfg, err := dnsGetConfig()
 	if err != nil {
-		return nil, fmt.Errorf("Could not parse /etc/resolv.conf: %s", err)
+		return nil, err
 	}
 
 	c := new(dns.Client)

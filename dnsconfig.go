@@ -28,7 +28,55 @@
 
 package srvclient
 
-import "net"
+import (
+	"net"
+	"os"
+	"time"
+)
+
+const resolvFile = "/etc/resolv.conf"
+
+// go's net package used 5 seconds as its reload interval, we might as well too
+const reloadInterval = 5 * time.Second
+
+type dnsConfigGet struct {
+	cfg *dnsConfig
+	err error
+}
+
+var dnsConfigCh = make(chan dnsConfigGet)
+
+func dnsShouldReload(lastReload time.Time) bool {
+	fi, err := os.Stat(resolvFile)
+	if err != nil {
+		return false
+	}
+	return lastReload.Before(fi.ModTime())
+}
+
+func dnsConfigLoop() {
+	var r dnsConfigGet
+	r.cfg, r.err = dnsReadConfig(resolvFile)
+	tick := time.Tick(reloadInterval)
+	lastReload := time.Now()
+	for {
+		select {
+		case dnsConfigCh <- r:
+		case <-tick:
+			if r.err == nil && !dnsShouldReload(lastReload) {
+				continue
+			}
+			if r.cfg, r.err = dnsReadConfig(resolvFile); r.err == nil {
+				lastReload = time.Now()
+			}
+		}
+	}
+}
+
+func dnsGetConfig() (*dnsConfig, error) {
+	r := <-dnsConfigCh
+	return r.cfg, r.err
+}
 
 type dnsConfig struct {
 	servers  []string // servers to use
