@@ -13,13 +13,28 @@ import (
 	"time"
 
 	"github.com/miekg/dns"
+	"net"
+	"sort"
 )
+
+// sortableSRV implements sort.Interface for []*dns.SRV based on
+// the Priority and Weight fields
+type sortableSRV []*dns.SRV
+
+func (a sortableSRV) Len() int { return len(a) }
+func (a sortableSRV) Swap(i, j int) { a[i], a[j] = a[j], a[i] }
+func (a sortableSRV) Less(i, j int) bool {
+	if a[i].Priority == a[j].Priority {
+		return a[i].Weight > a[j].Weight
+	}
+	return a[i].Priority < a[j].Priority
+}
 
 func init() {
 	go dnsConfigLoop()
 }
 
-func lookupSRV(hostname string) (*dns.Msg, error) {
+func lookupSRV(hostname string) ([]*dns.SRV, error) {
 	cfg, err := dnsGetConfig()
 	if err != nil {
 		return nil, err
@@ -38,26 +53,37 @@ func lookupSRV(hostname string) (*dns.Msg, error) {
 	m.SetQuestion(fqdn, dns.TypeSRV)
 	m.SetEdns0(dns.DefaultMsgSize, false)
 
+	var res *dns.Msg
 	for _, server := range cfg.servers {
-		res, _, err := c.Exchange(m, server+":53")
-		if err != nil {
+		if res, _, err = c.Exchange(m, server + ":53"); err != nil {
 			continue
 		}
 		if res.Rcode != dns.RcodeFormatError {
-			return res, nil
+			break
 		}
 
 		// At this point we got a response, but it was just to tell us that
 		// edns0 isn't supported, so we try again without it
 		m2 := new(dns.Msg)
 		m2.SetQuestion(fqdn, dns.TypeSRV)
-		res, _, err = c.Exchange(m2, server+":53")
-		if err == nil {
-			return res, nil
+		if res, _, err = c.Exchange(m2, server + ":53"); err == nil {
+			break
 		}
 	}
+	if res == nil {
+		return nil, errors.New("no available nameservers")
+	}
 
-	return nil, errors.New("no available nameservers")
+	ans := make([]*dns.SRV, len(res.Answer))
+	for i := range res.Answer {
+		if ansSRV, ok := res.Answer[i].(*dns.SRV); ok {
+			ans[i] = ansSRV
+		}
+	}
+	if len(res.Answer) == 0 {
+		return nil, fmt.Errorf("No SRV records for %q", hostname)
+	}
+	return ans, nil
 }
 
 // SRV will perform a SRV request on the given hostname, and then choose one of
@@ -75,20 +101,9 @@ func SRV(hostname string) (string, error) {
 		portStr = parts[1]
 	}
 
-	res, err := lookupSRV(hostname)
+	ans, err := lookupSRV(hostname)
 	if err != nil {
 		return "", err
-	}
-
-	if len(res.Answer) == 0 {
-		return "", fmt.Errorf("No SRV records for %q", hostname)
-	}
-
-	ans := make([]*dns.SRV, len(res.Answer))
-	for i := range res.Answer {
-		if ansSRV, ok := res.Answer[i].(*dns.SRV); ok {
-			ans[i] = ansSRV
-		}
 	}
 
 	srv := pickSRV(ans)
@@ -111,6 +126,47 @@ func SRVNoPort(hostname string) (string, error) {
 	}
 
 	return addr[:strings.Index(addr, ":")], nil
+}
+
+// AllSRV returns the list of all hostnames and ports for the SRV lookup
+// The results are sorted by priority and then weight. Like SRV, if hostname
+// contained a port then the port on all results will be replaced with the
+// originally-passed port
+func AllSRV(hostname string) ([]string, error) {
+	var ogPort string
+	if parts := strings.Split(hostname, ":"); len(parts) == 2 {
+		hostname = parts[0]
+		ogPort = parts[1]
+	}
+
+	ans, err := lookupSRV(hostname)
+	if err != nil {
+		return nil, err
+	}
+
+	sort.Sort(sortableSRV(ans))
+
+	res := make([]string, len(ans))
+	for i := range ans {
+		if ogPort != "" {
+			res[i] = ans[i].Target + ":" + ogPort
+		} else {
+			res[i] = ans[i].Target + ":" + strconv.Itoa(int(ans[i].Port))
+		}
+	}
+	return res, nil
+}
+
+// MaybeSRV attempts a SRV lookup if the host doesn't contain a port and if the
+// SRV lookup succeeds it'll rewrite the host and return it with the lookup
+// result. If it fails it'll just return the host originally sent
+func MaybeSRV(host string) string {
+	if _, p, _ := net.SplitHostPort(host); p == "" {
+		if addr, err := SRV(host); err == nil {
+			host = addr
+		}
+	}
+	return host
 }
 
 func pickSRV(srvs []*dns.SRV) *dns.SRV {
