@@ -34,7 +34,33 @@ func init() {
 	go dnsConfigLoop()
 }
 
-func lookupSRV(hostname string) ([]*dns.SRV, error) {
+func replaceSRVTarget(r *dns.SRV, extra []dns.RR) *dns.SRV {
+	for _, e := range extra {
+		if eA, ok := e.(*dns.A); ok && eA.Hdr.Name == r.Target {
+			r.Target = eA.A.String()
+		} else if eAAAA, ok := e.(*dns.AAAA); ok && eAAAA.Hdr.Name == r.Target {
+			r.Target = eAAAA.AAAA.String()
+		}
+	}
+	return r
+}
+
+// getCFGServers compiles a list of servers from the dnsConfig
+// this is a variable so it can be overwritten in tests
+var getCFGServers = func(cfg *dnsConfig) []string {
+	res := make([]string, len(cfg.servers))
+	for i, s := range cfg.servers {
+		_, p, _ := net.SplitHostPort(s)
+		if p == "" {
+			res[i] = s + ":53"
+		} else {
+			res[i] = s
+		}
+	}
+	return res
+}
+
+func lookupSRV(hostname string, replaceWithIPs bool) ([]*dns.SRV, error) {
 	cfg, err := dnsGetConfig()
 	if err != nil {
 		return nil, err
@@ -54,8 +80,9 @@ func lookupSRV(hostname string) ([]*dns.SRV, error) {
 	m.SetEdns0(dns.DefaultMsgSize, false)
 
 	var res *dns.Msg
-	for _, server := range cfg.servers {
-		if res, _, err = c.Exchange(m, server + ":53"); err != nil {
+	servers := getCFGServers(cfg)
+	for _, server := range servers {
+		if res, _, err = c.Exchange(m, server); err != nil {
 			continue
 		}
 		if res.Rcode != dns.RcodeFormatError {
@@ -66,7 +93,7 @@ func lookupSRV(hostname string) ([]*dns.SRV, error) {
 		// edns0 isn't supported, so we try again without it
 		m2 := new(dns.Msg)
 		m2.SetQuestion(fqdn, dns.TypeSRV)
-		if res, _, err = c.Exchange(m2, server + ":53"); err == nil {
+		if res, _, err = c.Exchange(m2, server); err == nil {
 			break
 		}
 	}
@@ -74,10 +101,14 @@ func lookupSRV(hostname string) ([]*dns.SRV, error) {
 		return nil, errors.New("no available nameservers")
 	}
 
-	ans := make([]*dns.SRV, len(res.Answer))
+	ans := make([]*dns.SRV, 0, len(res.Answer))
 	for i := range res.Answer {
 		if ansSRV, ok := res.Answer[i].(*dns.SRV); ok {
-			ans[i] = ansSRV
+			if replaceWithIPs {
+				// attempt to replace SRV's Target with the actual IP
+				ansSRV = replaceSRVTarget(ansSRV, res.Extra)
+			}
+			ans = append(ans, ansSRV)
 		}
 	}
 	if len(res.Answer) == 0 {
@@ -89,7 +120,9 @@ func lookupSRV(hostname string) ([]*dns.SRV, error) {
 // SRV will perform a SRV request on the given hostname, and then choose one of
 // the returned entries randomly based on the priority and weight fields it
 // sees. It will return the address ("host:port") of the winning entry, or an
-// error if the query couldn't be made or it returned no entries.
+// error if the query couldn't be made or it returned no entries. If the DNS
+// server provided the A records for the hosts, then the result will have the
+// target replaced with its respective IP.
 //
 // If the given hostname already has a ":port" appended to it, only the ip will
 // be looked up from the SRV request, but the port given will be returned
@@ -101,7 +134,7 @@ func SRV(hostname string) (string, error) {
 		portStr = parts[1]
 	}
 
-	ans, err := lookupSRV(hostname)
+	ans, err := lookupSRV(hostname, true)
 	if err != nil {
 		return "", err
 	}
@@ -132,6 +165,7 @@ func SRVNoPort(hostname string) (string, error) {
 // The results are sorted by priority and then weight. Like SRV, if hostname
 // contained a port then the port on all results will be replaced with the
 // originally-passed port
+// AllSRV will NOT replace hostnames with their respective IPs
 func AllSRV(hostname string) ([]string, error) {
 	var ogPort string
 	if parts := strings.Split(hostname, ":"); len(parts) == 2 {
@@ -139,7 +173,7 @@ func AllSRV(hostname string) ([]string, error) {
 		ogPort = parts[1]
 	}
 
-	ans, err := lookupSRV(hostname)
+	ans, err := lookupSRV(hostname, false)
 	if err != nil {
 		return nil, err
 	}

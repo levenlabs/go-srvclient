@@ -6,6 +6,8 @@ import (
 	"github.com/miekg/dns"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"net"
+	"time"
 )
 
 var regHostname = "mysuperfancyapi.com"
@@ -113,4 +115,96 @@ func TestMaybeSRV(t *T) {
 	// the beginning part of the hostname is random, we only care that it
 	// appended the port (1 in this case)
 	assert.Contains(t, r, ".mysuperfancyapi.com.:1")
+}
+
+func TestSRVReplace(t *T) {
+	_getCFGServers := getCFGServers
+	defer func() {
+		getCFGServers = _getCFGServers
+	}()
+
+	handleRequest := func(w dns.ResponseWriter, r *dns.Msg) {
+		require.Len(t, r.Question, 1)
+		require.Equal(t, "srv.test.com.", r.Question[0].Name)
+
+		m := new(dns.Msg)
+		m.SetRcode(r, dns.RcodeSuccess)
+		m.Answer = []dns.RR{
+			&dns.SRV{
+				Hdr: dns.RR_Header{
+					Name: "srv.test.com.",
+					Rrtype: dns.TypeSRV,
+					Class: dns.ClassINET,
+					Ttl: 60,
+				},
+				Port: 1000,
+				Target: "1.srv.test.com.",
+			},
+			&dns.SRV{
+				Hdr: dns.RR_Header{
+					Name: "srv.test.com.",
+					Rrtype: dns.TypeSRV,
+					Class: dns.ClassINET,
+					Ttl: 60,
+				},
+				Port: 1001,
+				Target: "2.srv.test.com.",
+			},
+		}
+		m.Extra = []dns.RR{
+			&dns.A{
+				Hdr: dns.RR_Header{
+					Name: "1.srv.test.com.",
+					Rrtype: dns.TypeA,
+					Class: dns.ClassINET,
+					Ttl: 60,
+				},
+				A: net.ParseIP("10.0.0.1"),
+			},
+			&dns.AAAA{
+				Hdr: dns.RR_Header{
+					Name: "2.srv.test.com.",
+					Rrtype: dns.TypeAAAA,
+					Class: dns.ClassINET,
+					Ttl: 60,
+				},
+				AAAA: net.ParseIP("2607:5300:60:92e7::1"),
+			},
+		}
+		err := w.WriteMsg(m)
+		require.Nil(t, err)
+	}
+
+	server := &dns.Server{
+		Addr: ":0",
+		Net: "udp",
+		Handler: dns.HandlerFunc(handleRequest),
+	}
+	go func(){
+		err := server.ListenAndServe()
+		panic(err)
+	}()
+	// give the goroutine a chance to start
+	<-time.After(100 * time.Millisecond)
+	// immediately call this again since this will block until the previous call
+	// is finished
+	err := server.ListenAndServe()
+	require.NotNil(t, err)
+	require.Equal(t, "dns: server already started", err.Error())
+	require.NotNil(t, server.PacketConn)
+
+	addrs := []string{server.PacketConn.LocalAddr().String()}
+	//override getCFGServers with our own server we just started
+	getCFGServers = func(cfg *dnsConfig) []string {
+		return addrs
+	}
+
+	srvs, err := lookupSRV("srv.test.com", true)
+	require.Nil(t, err)
+	require.Len(t, srvs, 2)
+
+	assert.Equal(t, srvs[0].Target, "10.0.0.1")
+	assert.EqualValues(t, srvs[0].Port, 1000)
+	assert.Equal(t, srvs[1].Target, "2607:5300:60:92e7::1")
+	assert.EqualValues(t, srvs[1].Port, 1001)
 }
