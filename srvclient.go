@@ -10,6 +10,7 @@ import (
 	"math/rand"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"net"
@@ -38,7 +39,14 @@ func init() {
 // SRVClient is a holder for methods related to SRV lookups. Parameters on it
 // can be modified before any methods are called, but not after. All methods are
 // thread-safe.
-type SRVClient struct{}
+type SRVClient struct {
+	// When true, SRVClient will cache the last successful SRV response for each
+	// domain requested, and if the next request results in some kind of error
+	// it will use that last response instead
+	CacheLast  bool
+	cacheLastM map[string]*dns.Msg
+	cacheLastL sync.RWMutex
+}
 
 // DefaultSRVClient is an instance of SRVClient with all zero'd values, used as
 // the default client for all global methods. It can be overwritten prior to any
@@ -71,7 +79,31 @@ var getCFGServers = func(cfg *dnsConfig) []string {
 	return res
 }
 
-func lookupSRV(hostname string, replaceWithIPs bool) ([]*dns.SRV, error) {
+func (sc SRVClient) cacheLast(hostname string, res *dns.Msg) *dns.Msg {
+	if !sc.CacheLast {
+		return res
+	}
+
+	if res == nil {
+		sc.cacheLastL.RLock()
+		defer sc.cacheLastL.RUnlock()
+		if sc.cacheLastM == nil {
+			return res
+		}
+		return sc.cacheLastM[hostname]
+
+	}
+
+	sc.cacheLastL.Lock()
+	defer sc.cacheLastL.Unlock()
+	if sc.cacheLastM == nil {
+		sc.cacheLastM = map[string]*dns.Msg{}
+	}
+	sc.cacheLastM[hostname] = res
+	return res
+}
+
+func (sc SRVClient) lookupSRV(hostname string, replaceWithIPs bool) ([]*dns.SRV, error) {
 	cfg, err := dnsGetConfig()
 	if err != nil {
 		return nil, err
@@ -108,6 +140,11 @@ func lookupSRV(hostname string, replaceWithIPs bool) ([]*dns.SRV, error) {
 			break
 		}
 	}
+
+	// Handles caching this response if it's a successful one, or replacing res
+	// with the last response if not. Does nothing if sc.CacheLast is false.
+	res = sc.cacheLast(hostname, res)
+
 	if res == nil {
 		return nil, errors.New("no available nameservers")
 	}
@@ -125,6 +162,7 @@ func lookupSRV(hostname string, replaceWithIPs bool) ([]*dns.SRV, error) {
 	if len(res.Answer) == 0 {
 		return nil, fmt.Errorf("No SRV records for %q", hostname)
 	}
+
 	return ans, nil
 }
 
@@ -150,7 +188,7 @@ func (sc SRVClient) SRV(hostname string) (string, error) {
 		portStr = parts[1]
 	}
 
-	ans, err := lookupSRV(hostname, true)
+	ans, err := sc.lookupSRV(hostname, true)
 	if err != nil {
 		return "", err
 	}
@@ -199,7 +237,7 @@ func (sc SRVClient) AllSRV(hostname string) ([]string, error) {
 		ogPort = parts[1]
 	}
 
-	ans, err := lookupSRV(hostname, false)
+	ans, err := sc.lookupSRV(hostname, false)
 	if err != nil {
 		return nil, err
 	}

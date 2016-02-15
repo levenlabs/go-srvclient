@@ -199,7 +199,7 @@ func TestSRVReplace(t *T) {
 		return addrs
 	}
 
-	srvs, err := lookupSRV("srv.test.com", true)
+	srvs, err := DefaultSRVClient.lookupSRV("srv.test.com", true)
 	require.Nil(t, err)
 	require.Len(t, srvs, 2)
 
