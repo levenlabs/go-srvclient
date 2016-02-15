@@ -159,11 +159,18 @@ func (sc SRVClient) lookupSRV(hostname string, replaceWithIPs bool) ([]*dns.SRV,
 			ans = append(ans, ansSRV)
 		}
 	}
-	if len(res.Answer) == 0 {
+	if len(ans) == 0 {
 		return nil, fmt.Errorf("No SRV records for %q", hostname)
 	}
 
 	return ans, nil
+}
+
+func srvToStr(srv *dns.SRV, port string) string {
+	if port == "" {
+		port = strconv.Itoa(int(srv.Port))
+	}
+	return net.JoinHostPort(srv.Target, port)
 }
 
 // SRV calls the SRV method on the DefaultSRVClient
@@ -181,7 +188,6 @@ func SRV(hostname string) (string, error) {
 // If the given hostname already has a ":port" appended to it, only the ip will
 // be looked up from the SRV request, but the port given will be returned
 func (sc SRVClient) SRV(hostname string) (string, error) {
-
 	var portStr string
 	if parts := strings.Split(hostname, ":"); len(parts) == 2 {
 		hostname = parts[0]
@@ -195,13 +201,7 @@ func (sc SRVClient) SRV(hostname string) (string, error) {
 
 	srv := pickSRV(ans)
 
-	// Only use the returned port if one wasn't supplied in the hostname
-	if portStr == "" {
-		portStr = strconv.Itoa(int(srv.Port))
-	}
-
-	addr := srv.Target + ":" + portStr
-	return addr, nil
+	return srvToStr(srv, portStr), nil
 }
 
 // SRVNoPort calls the SRVNoPort method on the DefaultSRVClient
@@ -217,7 +217,8 @@ func (sc SRVClient) SRVNoPort(hostname string) (string, error) {
 		return "", err
 	}
 
-	return addr[:strings.Index(addr, ":")], nil
+	host, _, err := net.SplitHostPort(addr)
+	return host, err
 }
 
 // AllSRV calls the AllSRV method on the DefaultSRVClient
@@ -246,11 +247,7 @@ func (sc SRVClient) AllSRV(hostname string) ([]string, error) {
 
 	res := make([]string, len(ans))
 	for i := range ans {
-		if ogPort != "" {
-			res[i] = ans[i].Target + ":" + ogPort
-		} else {
-			res[i] = ans[i].Target + ":" + strconv.Itoa(int(ans[i].Port))
-		}
+		res[i] = srvToStr(ans[i], ogPort)
 	}
 	return res, nil
 }
@@ -296,6 +293,10 @@ func pickSRV(srvs []*dns.SRV) *dns.SRV {
 	sum := 0
 	for i := range weights {
 		sum += weights[i]
+	}
+
+	if sum == 0 {
+		return picks[rand.Intn(len(picks))]
 	}
 
 	r := rand.Intn(sum)
