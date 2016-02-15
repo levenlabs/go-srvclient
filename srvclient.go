@@ -12,16 +12,17 @@ import (
 	"strings"
 	"time"
 
-	"github.com/miekg/dns"
 	"net"
 	"sort"
+
+	"github.com/miekg/dns"
 )
 
 // sortableSRV implements sort.Interface for []*dns.SRV based on
 // the Priority and Weight fields
 type sortableSRV []*dns.SRV
 
-func (a sortableSRV) Len() int { return len(a) }
+func (a sortableSRV) Len() int      { return len(a) }
 func (a sortableSRV) Swap(i, j int) { a[i], a[j] = a[j], a[i] }
 func (a sortableSRV) Less(i, j int) bool {
 	if a[i].Priority == a[j].Priority {
@@ -33,6 +34,16 @@ func (a sortableSRV) Less(i, j int) bool {
 func init() {
 	go dnsConfigLoop()
 }
+
+// SRVClient is a holder for methods related to SRV lookups. Parameters on it
+// can be modified before any methods are called, but not after. All methods are
+// thread-safe.
+type SRVClient struct{}
+
+// DefaultSRVClient is an instance of SRVClient with all zero'd values, used as
+// the default client for all global methods. It can be overwritten prior to any
+// of the methods being used in order to modify their behavior
+var DefaultSRVClient SRVClient
 
 func replaceSRVTarget(r *dns.SRV, extra []dns.RR) *dns.SRV {
 	for _, e := range extra {
@@ -117,6 +128,11 @@ func lookupSRV(hostname string, replaceWithIPs bool) ([]*dns.SRV, error) {
 	return ans, nil
 }
 
+// SRV calls the SRV method on the DefaultSRVClient
+func SRV(hostname string) (string, error) {
+	return DefaultSRVClient.SRV(hostname)
+}
+
 // SRV will perform a SRV request on the given hostname, and then choose one of
 // the returned entries randomly based on the priority and weight fields it
 // sees. It will return the address ("host:port") of the winning entry, or an
@@ -126,7 +142,7 @@ func lookupSRV(hostname string, replaceWithIPs bool) ([]*dns.SRV, error) {
 //
 // If the given hostname already has a ":port" appended to it, only the ip will
 // be looked up from the SRV request, but the port given will be returned
-func SRV(hostname string) (string, error) {
+func (sc SRVClient) SRV(hostname string) (string, error) {
 
 	var portStr string
 	if parts := strings.Split(hostname, ":"); len(parts) == 2 {
@@ -150,9 +166,14 @@ func SRV(hostname string) (string, error) {
 	return addr, nil
 }
 
+// SRVNoPort calls the SRVNoPort method on the DefaultSRVClient
+func SRVNoPort(hostname string) (string, error) {
+	return DefaultSRVClient.SRVNoPort(hostname)
+}
+
 // SRVNoPort behaves the same as SRV, but the returned address string will not
 // contain the port
-func SRVNoPort(hostname string) (string, error) {
+func (sc SRVClient) SRVNoPort(hostname string) (string, error) {
 	addr, err := SRV(hostname)
 	if err != nil {
 		return "", err
@@ -161,12 +182,17 @@ func SRVNoPort(hostname string) (string, error) {
 	return addr[:strings.Index(addr, ":")], nil
 }
 
+// AllSRV calls the AllSRV method on the DefaultSRVClient
+func AllSRV(hostname string) ([]string, error) {
+	return DefaultSRVClient.AllSRV(hostname)
+}
+
 // AllSRV returns the list of all hostnames and ports for the SRV lookup
 // The results are sorted by priority and then weight. Like SRV, if hostname
 // contained a port then the port on all results will be replaced with the
 // originally-passed port
 // AllSRV will NOT replace hostnames with their respective IPs
-func AllSRV(hostname string) ([]string, error) {
+func (sc SRVClient) AllSRV(hostname string) ([]string, error) {
 	var ogPort string
 	if parts := strings.Split(hostname, ":"); len(parts) == 2 {
 		hostname = parts[0]
@@ -191,10 +217,15 @@ func AllSRV(hostname string) ([]string, error) {
 	return res, nil
 }
 
+// MaybeSRV calls the MaybeSRV method on the DefaultSRVClient
+func MaybeSRV(host string) string {
+	return DefaultSRVClient.MaybeSRV(host)
+}
+
 // MaybeSRV attempts a SRV lookup if the host doesn't contain a port and if the
 // SRV lookup succeeds it'll rewrite the host and return it with the lookup
 // result. If it fails it'll just return the host originally sent
-func MaybeSRV(host string) string {
+func (sc SRVClient) MaybeSRV(host string) string {
 	if _, p, _ := net.SplitHostPort(host); p == "" {
 		if addr, err := SRV(host); err == nil {
 			host = addr
