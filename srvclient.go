@@ -36,16 +36,25 @@ func init() {
 	go dnsConfigLoop()
 }
 
-// SRVClient is a holder for methods related to SRV lookups. Parameters on it
-// can be modified before any methods are called, but not after. All methods are
-// thread-safe.
+// SRVClient is a holder for methods related to SRV lookups
 type SRVClient struct {
-	// When true, SRVClient will cache the last successful SRV response for each
-	// domain requested, and if the next request results in some kind of error
-	// it will use that last response instead
-	CacheLast  bool
-	cacheLastM map[string]*dns.Msg
+	cacheLast  map[string]*dns.Msg
 	cacheLastL sync.RWMutex
+
+	// Defaults to the global getCFGServers if not specified. Nice to have here
+	// for tests
+	getCFGServers func(*dnsConfig) []string
+}
+
+// When used, SRVClient will cache the last successful SRV response for each
+// domain requested, and if the next request results in some kind of error it
+// will use that last response instead.
+func (sc *SRVClient) EnableCacheLast() {
+	sc.cacheLastL.Lock()
+	if sc.cacheLast == nil {
+		sc.cacheLast = map[string]*dns.Msg{}
+	}
+	sc.cacheLastL.Unlock()
 }
 
 // DefaultSRVClient is an instance of SRVClient with all zero'd values, used as
@@ -64,9 +73,7 @@ func replaceSRVTarget(r *dns.SRV, extra []dns.RR) *dns.SRV {
 	return r
 }
 
-// getCFGServers compiles a list of servers from the dnsConfig
-// this is a variable so it can be overwritten in tests
-var getCFGServers = func(cfg *dnsConfig) []string {
+func getCFGServers(cfg *dnsConfig) []string {
 	res := make([]string, len(cfg.servers))
 	for i, s := range cfg.servers {
 		_, p, _ := net.SplitHostPort(s)
@@ -79,27 +86,20 @@ var getCFGServers = func(cfg *dnsConfig) []string {
 	return res
 }
 
-func (sc SRVClient) cacheLast(hostname string, res *dns.Msg) *dns.Msg {
-	if !sc.CacheLast {
+func (sc SRVClient) doCacheLast(hostname string, res *dns.Msg) *dns.Msg {
+	if sc.cacheLast == nil {
 		return res
 	}
 
 	if res == nil {
 		sc.cacheLastL.RLock()
 		defer sc.cacheLastL.RUnlock()
-		if sc.cacheLastM == nil {
-			return res
-		}
-		return sc.cacheLastM[hostname]
-
+		return sc.cacheLast[hostname]
 	}
 
 	sc.cacheLastL.Lock()
 	defer sc.cacheLastL.Unlock()
-	if sc.cacheLastM == nil {
-		sc.cacheLastM = map[string]*dns.Msg{}
-	}
-	sc.cacheLastM[hostname] = res
+	sc.cacheLast[hostname] = res
 	return res
 }
 
@@ -123,7 +123,11 @@ func (sc SRVClient) lookupSRV(hostname string, replaceWithIPs bool) ([]*dns.SRV,
 	m.SetEdns0(dns.DefaultMsgSize, false)
 
 	var res *dns.Msg
-	servers := getCFGServers(cfg)
+	getCFGFn := sc.getCFGServers
+	if getCFGFn == nil {
+		getCFGFn = getCFGServers
+	}
+	servers := getCFGFn(cfg)
 	for _, server := range servers {
 		if res, _, err = c.Exchange(m, server); err != nil {
 			continue
@@ -142,8 +146,8 @@ func (sc SRVClient) lookupSRV(hostname string, replaceWithIPs bool) ([]*dns.SRV,
 	}
 
 	// Handles caching this response if it's a successful one, or replacing res
-	// with the last response if not. Does nothing if sc.CacheLast is false.
-	res = sc.cacheLast(hostname, res)
+	// with the last response if not. Does nothing if sc.cacheLast is false.
+	res = sc.doCacheLast(hostname, res)
 
 	if res == nil {
 		return nil, errors.New("no available nameservers")

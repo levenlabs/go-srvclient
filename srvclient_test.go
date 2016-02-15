@@ -56,7 +56,7 @@ func init() {
 
 	addrs := []string{server.PacketConn.LocalAddr().String()}
 	//override getCFGServers with our own server we just started
-	getCFGServers = func(cfg *dnsConfig) []string {
+	DefaultSRVClient.getCFGServers = func(cfg *dnsConfig) []string {
 		return addrs
 	}
 }
@@ -149,4 +149,24 @@ func TestMaybeSRV(t *T) {
 
 	r = MaybeSRV(testHostname)
 	assert.True(t, r == "10.0.0.1:1000" || r == "[2607:5300:60:92e7::1]:1001")
+}
+
+func TestLastCache(t *T) {
+	cl := SRVClient{}
+	cl.EnableCacheLast()
+	cl.getCFGServers = DefaultSRVClient.getCFGServers
+
+	_, err := cl.SRV(testHostname)
+	require.Nil(t, err)
+
+	cl.getCFGServers = func(_ *dnsConfig) []string { return []string{} }
+
+	r, err := cl.SRV(testHostname)
+	require.Nil(t, err)
+	assert.True(t, r == "10.0.0.1:1000" || r == "[2607:5300:60:92e7::1]:1001")
+	assert.Len(t, cl.cacheLast, 1)
+
+	cl.cacheLast = nil
+	_, err = cl.SRV(testHostname)
+	assert.NotNil(t, err)
 }
