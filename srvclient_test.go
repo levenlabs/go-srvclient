@@ -70,6 +70,29 @@ func testDistr(srvs []*dns.SRV) map[string]int {
 	return m
 }
 
+func TestLookupSRV(t *T) {
+	assertHasSRV := func(host string, port int, srvs []*dns.SRV) {
+		found := false
+		for _, srv := range srvs {
+			if srv.Target == host && srv.Port == uint16(port) {
+				found = true
+				break
+			}
+		}
+		assert.True(t, found)
+	}
+
+	rr, err := DefaultSRVClient.lookupSRV(testHostname, false)
+	require.Nil(t, err)
+	assertHasSRV("1.srv.test.com.", 1000, rr)
+	assertHasSRV("2.srv.test.com.", 1001, rr)
+
+	rr, err = DefaultSRVClient.lookupSRV(testHostname, true)
+	require.Nil(t, err)
+	assertHasSRV("10.0.0.1", 1000, rr)
+	assertHasSRV("2607:5300:60:92e7::1", 1001, rr)
+}
+
 func TestSRV(t *T) {
 	r, err := SRV(testHostname)
 	require.Nil(t, err)
