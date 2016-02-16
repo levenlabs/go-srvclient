@@ -10,18 +10,20 @@ import (
 	"math/rand"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
-	"github.com/miekg/dns"
 	"net"
 	"sort"
+
+	"github.com/miekg/dns"
 )
 
 // sortableSRV implements sort.Interface for []*dns.SRV based on
 // the Priority and Weight fields
 type sortableSRV []*dns.SRV
 
-func (a sortableSRV) Len() int { return len(a) }
+func (a sortableSRV) Len() int      { return len(a) }
 func (a sortableSRV) Swap(i, j int) { a[i], a[j] = a[j], a[i] }
 func (a sortableSRV) Less(i, j int) bool {
 	if a[i].Priority == a[j].Priority {
@@ -34,6 +36,32 @@ func init() {
 	go dnsConfigLoop()
 }
 
+// SRVClient is a holder for methods related to SRV lookups
+type SRVClient struct {
+	cacheLast  map[string]*dns.Msg
+	cacheLastL sync.RWMutex
+
+	// Defaults to the global getCFGServers if not specified. Nice to have here
+	// for tests
+	getCFGServers func(*dnsConfig) []string
+}
+
+// When used, SRVClient will cache the last successful SRV response for each
+// domain requested, and if the next request results in some kind of error it
+// will use that last response instead.
+func (sc *SRVClient) EnableCacheLast() {
+	sc.cacheLastL.Lock()
+	if sc.cacheLast == nil {
+		sc.cacheLast = map[string]*dns.Msg{}
+	}
+	sc.cacheLastL.Unlock()
+}
+
+// DefaultSRVClient is an instance of SRVClient with all zero'd values, used as
+// the default client for all global methods. It can be overwritten prior to any
+// of the methods being used in order to modify their behavior
+var DefaultSRVClient SRVClient
+
 func replaceSRVTarget(r *dns.SRV, extra []dns.RR) *dns.SRV {
 	for _, e := range extra {
 		if eA, ok := e.(*dns.A); ok && eA.Hdr.Name == r.Target {
@@ -45,9 +73,7 @@ func replaceSRVTarget(r *dns.SRV, extra []dns.RR) *dns.SRV {
 	return r
 }
 
-// getCFGServers compiles a list of servers from the dnsConfig
-// this is a variable so it can be overwritten in tests
-var getCFGServers = func(cfg *dnsConfig) []string {
+func getCFGServers(cfg *dnsConfig) []string {
 	res := make([]string, len(cfg.servers))
 	for i, s := range cfg.servers {
 		_, p, _ := net.SplitHostPort(s)
@@ -60,7 +86,24 @@ var getCFGServers = func(cfg *dnsConfig) []string {
 	return res
 }
 
-func lookupSRV(hostname string, replaceWithIPs bool) ([]*dns.SRV, error) {
+func (sc SRVClient) doCacheLast(hostname string, res *dns.Msg) *dns.Msg {
+	if sc.cacheLast == nil {
+		return res
+	}
+
+	if res == nil {
+		sc.cacheLastL.RLock()
+		defer sc.cacheLastL.RUnlock()
+		return sc.cacheLast[hostname]
+	}
+
+	sc.cacheLastL.Lock()
+	defer sc.cacheLastL.Unlock()
+	sc.cacheLast[hostname] = res
+	return res
+}
+
+func (sc SRVClient) lookupSRV(hostname string, replaceWithIPs bool) ([]*dns.SRV, error) {
 	cfg, err := dnsGetConfig()
 	if err != nil {
 		return nil, err
@@ -80,7 +123,11 @@ func lookupSRV(hostname string, replaceWithIPs bool) ([]*dns.SRV, error) {
 	m.SetEdns0(dns.DefaultMsgSize, false)
 
 	var res *dns.Msg
-	servers := getCFGServers(cfg)
+	getCFGFn := sc.getCFGServers
+	if getCFGFn == nil {
+		getCFGFn = getCFGServers
+	}
+	servers := getCFGFn(cfg)
 	for _, server := range servers {
 		if res, _, err = c.Exchange(m, server); err != nil {
 			continue
@@ -97,6 +144,11 @@ func lookupSRV(hostname string, replaceWithIPs bool) ([]*dns.SRV, error) {
 			break
 		}
 	}
+
+	// Handles caching this response if it's a successful one, or replacing res
+	// with the last response if not. Does nothing if sc.cacheLast is false.
+	res = sc.doCacheLast(hostname, res)
+
 	if res == nil {
 		return nil, errors.New("no available nameservers")
 	}
@@ -111,10 +163,23 @@ func lookupSRV(hostname string, replaceWithIPs bool) ([]*dns.SRV, error) {
 			ans = append(ans, ansSRV)
 		}
 	}
-	if len(res.Answer) == 0 {
+	if len(ans) == 0 {
 		return nil, fmt.Errorf("No SRV records for %q", hostname)
 	}
+
 	return ans, nil
+}
+
+func srvToStr(srv *dns.SRV, port string) string {
+	if port == "" {
+		port = strconv.Itoa(int(srv.Port))
+	}
+	return net.JoinHostPort(srv.Target, port)
+}
+
+// SRV calls the SRV method on the DefaultSRVClient
+func SRV(hostname string) (string, error) {
+	return DefaultSRVClient.SRV(hostname)
 }
 
 // SRV will perform a SRV request on the given hostname, and then choose one of
@@ -126,39 +191,43 @@ func lookupSRV(hostname string, replaceWithIPs bool) ([]*dns.SRV, error) {
 //
 // If the given hostname already has a ":port" appended to it, only the ip will
 // be looked up from the SRV request, but the port given will be returned
-func SRV(hostname string) (string, error) {
-
+func (sc SRVClient) SRV(hostname string) (string, error) {
 	var portStr string
 	if parts := strings.Split(hostname, ":"); len(parts) == 2 {
 		hostname = parts[0]
 		portStr = parts[1]
 	}
 
-	ans, err := lookupSRV(hostname, true)
+	ans, err := sc.lookupSRV(hostname, true)
 	if err != nil {
 		return "", err
 	}
 
 	srv := pickSRV(ans)
 
-	// Only use the returned port if one wasn't supplied in the hostname
-	if portStr == "" {
-		portStr = strconv.Itoa(int(srv.Port))
-	}
+	return srvToStr(srv, portStr), nil
+}
 
-	addr := srv.Target + ":" + portStr
-	return addr, nil
+// SRVNoPort calls the SRVNoPort method on the DefaultSRVClient
+func SRVNoPort(hostname string) (string, error) {
+	return DefaultSRVClient.SRVNoPort(hostname)
 }
 
 // SRVNoPort behaves the same as SRV, but the returned address string will not
 // contain the port
-func SRVNoPort(hostname string) (string, error) {
+func (sc SRVClient) SRVNoPort(hostname string) (string, error) {
 	addr, err := SRV(hostname)
 	if err != nil {
 		return "", err
 	}
 
-	return addr[:strings.Index(addr, ":")], nil
+	host, _, err := net.SplitHostPort(addr)
+	return host, err
+}
+
+// AllSRV calls the AllSRV method on the DefaultSRVClient
+func AllSRV(hostname string) ([]string, error) {
+	return DefaultSRVClient.AllSRV(hostname)
 }
 
 // AllSRV returns the list of all hostnames and ports for the SRV lookup
@@ -166,14 +235,14 @@ func SRVNoPort(hostname string) (string, error) {
 // contained a port then the port on all results will be replaced with the
 // originally-passed port
 // AllSRV will NOT replace hostnames with their respective IPs
-func AllSRV(hostname string) ([]string, error) {
+func (sc SRVClient) AllSRV(hostname string) ([]string, error) {
 	var ogPort string
 	if parts := strings.Split(hostname, ":"); len(parts) == 2 {
 		hostname = parts[0]
 		ogPort = parts[1]
 	}
 
-	ans, err := lookupSRV(hostname, false)
+	ans, err := sc.lookupSRV(hostname, false)
 	if err != nil {
 		return nil, err
 	}
@@ -182,19 +251,20 @@ func AllSRV(hostname string) ([]string, error) {
 
 	res := make([]string, len(ans))
 	for i := range ans {
-		if ogPort != "" {
-			res[i] = ans[i].Target + ":" + ogPort
-		} else {
-			res[i] = ans[i].Target + ":" + strconv.Itoa(int(ans[i].Port))
-		}
+		res[i] = srvToStr(ans[i], ogPort)
 	}
 	return res, nil
+}
+
+// MaybeSRV calls the MaybeSRV method on the DefaultSRVClient
+func MaybeSRV(host string) string {
+	return DefaultSRVClient.MaybeSRV(host)
 }
 
 // MaybeSRV attempts a SRV lookup if the host doesn't contain a port and if the
 // SRV lookup succeeds it'll rewrite the host and return it with the lookup
 // result. If it fails it'll just return the host originally sent
-func MaybeSRV(host string) string {
+func (sc SRVClient) MaybeSRV(host string) string {
 	if _, p, _ := net.SplitHostPort(host); p == "" {
 		if addr, err := SRV(host); err == nil {
 			host = addr
@@ -227,6 +297,10 @@ func pickSRV(srvs []*dns.SRV) *dns.SRV {
 	sum := 0
 	for i := range weights {
 		sum += weights[i]
+	}
+
+	if sum == 0 {
+		return picks[rand.Intn(len(picks))]
 	}
 
 	r := rand.Intn(sum)
