@@ -314,3 +314,17 @@ func pickSRV(srvs []*dns.SRV) *dns.SRV {
 	// We should never get here, just return the first pick
 	return picks[0]
 }
+
+// MaybeSRVURL calls the MaybeSRVURL method on the DefaultSRVClient
+func MaybeSRVURL(host string) string {
+	return DefaultSRVClient.MaybeSRVURL(host)
+}
+
+// MaybeSRVURL calls MaybeSRV and also prepends http://if no scheme was sent
+func (sc SRVClient) MaybeSRVURL(host string) string {
+	host = sc.MaybeSRV(host)
+	if !strings.Contains(host, "://") {
+		return "http://" + host
+	}
+	return host
+}

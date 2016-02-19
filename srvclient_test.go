@@ -193,3 +193,15 @@ func TestLastCache(t *T) {
 	_, err = cl.SRV(testHostname)
 	assert.NotNil(t, err)
 }
+
+func TestMaybeSRVURL(t *T) {
+	withScheme := "http://" + testHostnameNoSRV
+	r := MaybeSRVURL(withScheme)
+	assert.Equal(t, withScheme, r)
+
+	r = MaybeSRVURL(testHostnameNoSRV)
+	assert.Equal(t, withScheme, r)
+
+	r = MaybeSRVURL(testHostname)
+	assert.True(t, r == "http://10.0.0.1:1000" || r == "http://[2607:5300:60:92e7::1]:1001")
+}
