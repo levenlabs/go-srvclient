@@ -26,6 +26,9 @@
 // (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 // OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
+// This file is modified from the original, if we want to use the updated
+// version we'll have to do some extra work to consolidate them
+
 package srvclient
 
 import (
@@ -40,7 +43,7 @@ const resolvFile = "/etc/resolv.conf"
 const reloadInterval = 5 * time.Second
 
 type dnsConfigGet struct {
-	cfg *dnsConfig
+	cfg dnsConfig
 	err error
 }
 
@@ -73,7 +76,7 @@ func dnsConfigLoop() {
 	}
 }
 
-func dnsGetConfig() (*dnsConfig, error) {
+func dnsGetConfig() (dnsConfig, error) {
 	r := <-dnsConfigCh
 	return r.cfg, r.err
 }
@@ -90,13 +93,13 @@ type dnsConfig struct {
 // See resolv.conf(5) on a Linux machine.
 // TODO(rsc): Supposed to call uname() and chop the beginning
 // of the host name to get the default search domain.
-func dnsReadConfig(filename string) (*dnsConfig, error) {
+func dnsReadConfig(filename string) (dnsConfig, error) {
 	file, err := open(filename)
 	if err != nil {
-		return nil, err
+		return dnsConfig{}, err
 	}
 	defer file.close()
-	conf := &dnsConfig{
+	conf := dnsConfig{
 		ndots:    1,
 		timeout:  5,
 		attempts: 2,
@@ -113,7 +116,7 @@ func dnsReadConfig(filename string) (*dnsConfig, error) {
 				// just an IP address.  Otherwise we need DNS
 				// to look it up.
 				if net.ParseIP(f[1]) != nil {
-					conf.servers = append(conf.servers, f[1])
+					conf.servers = append(conf.servers, f[1]+":53")
 				}
 			}
 

@@ -54,11 +54,8 @@ func init() {
 	// is finished
 	server.ListenAndServe()
 
-	addrs := []string{server.PacketConn.LocalAddr().String()}
-	//override getCFGServers with our own server we just started
-	DefaultSRVClient.getCFGServers = func(cfg *dnsConfig) []string {
-		return addrs
-	}
+	//override ResolverAddrs with our own server we just started
+	DefaultSRVClient.ResolverAddrs = []string{server.PacketConn.LocalAddr().String()}
 }
 
 func testDistr(srvs []*dns.SRV) map[string]int {
@@ -177,12 +174,12 @@ func TestMaybeSRV(t *T) {
 func TestLastCache(t *T) {
 	cl := SRVClient{}
 	cl.EnableCacheLast()
-	cl.getCFGServers = DefaultSRVClient.getCFGServers
+	cl.ResolverAddrs = DefaultSRVClient.ResolverAddrs
 
 	_, err := cl.SRV(testHostname)
 	require.Nil(t, err)
 
-	cl.getCFGServers = func(_ *dnsConfig) []string { return []string{} }
+	cl.ResolverAddrs = nil
 
 	r, err := cl.SRV(testHostname)
 	require.Nil(t, err)
