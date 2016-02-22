@@ -41,9 +41,10 @@ type SRVClient struct {
 	cacheLast  map[string]*dns.Msg
 	cacheLastL sync.RWMutex
 
-	// Defaults to the global getCFGServers if not specified. Nice to have here
-	// for tests
-	getCFGServers func(*dnsConfig) []string
+	// A list of addresses ("ip:port") which should be used as the resolver
+	// list. If none are set then the resolver settings in /etc/resolv.conf are
+	// used
+	ResolverAddrs []string
 }
 
 // When used, SRVClient will cache the last successful SRV response for each
@@ -73,25 +74,12 @@ func replaceSRVTarget(r *dns.SRV, extra []dns.RR) *dns.SRV {
 	return r
 }
 
-func getCFGServers(cfg *dnsConfig) []string {
-	res := make([]string, len(cfg.servers))
-	for i, s := range cfg.servers {
-		_, p, _ := net.SplitHostPort(s)
-		if p == "" {
-			res[i] = s + ":53"
-		} else {
-			res[i] = s
-		}
-	}
-	return res
-}
-
 func (sc SRVClient) doCacheLast(hostname string, res *dns.Msg) *dns.Msg {
 	if sc.cacheLast == nil {
 		return res
 	}
 
-	if res == nil {
+	if res == nil || len(res.Answer) == 0 {
 		sc.cacheLastL.RLock()
 		defer sc.cacheLastL.RUnlock()
 		return sc.cacheLast[hostname]
@@ -108,6 +96,9 @@ func (sc SRVClient) lookupSRV(hostname string, replaceWithIPs bool) ([]*dns.SRV,
 	if err != nil {
 		return nil, err
 	}
+	if len(sc.ResolverAddrs) > 0 {
+		cfg.servers = sc.ResolverAddrs
+	}
 
 	c := new(dns.Client)
 	c.UDPSize = dns.DefaultMsgSize
@@ -123,12 +114,7 @@ func (sc SRVClient) lookupSRV(hostname string, replaceWithIPs bool) ([]*dns.SRV,
 	m.SetEdns0(dns.DefaultMsgSize, false)
 
 	var res *dns.Msg
-	getCFGFn := sc.getCFGServers
-	if getCFGFn == nil {
-		getCFGFn = getCFGServers
-	}
-	servers := getCFGFn(cfg)
-	for _, server := range servers {
+	for _, server := range cfg.servers {
 		if res, _, err = c.Exchange(m, server); err != nil {
 			continue
 		}
