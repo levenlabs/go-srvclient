@@ -26,6 +26,9 @@
 // (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 // OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
+// This file is modified from the original, if we want to use the updated
+// version we'll have to do some extra work to consolidate them
+
 package srvclient
 
 import (
