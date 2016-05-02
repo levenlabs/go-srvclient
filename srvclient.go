@@ -47,9 +47,9 @@ type SRVClient struct {
 	ResolverAddrs []string
 }
 
-// When used, SRVClient will cache the last successful SRV response for each
-// domain requested, and if the next request results in some kind of error it
-// will use that last response instead.
+// EnableCacheLast is used to make SRVClient cache the last successful SRV
+// response for each domain requested, and if the next request results in some
+// kind of error it will use that last response instead.
 func (sc *SRVClient) EnableCacheLast() {
 	sc.cacheLastL.Lock()
 	if sc.cacheLast == nil {
@@ -74,7 +74,7 @@ func replaceSRVTarget(r *dns.SRV, extra []dns.RR) *dns.SRV {
 	return r
 }
 
-func (sc SRVClient) doCacheLast(hostname string, res *dns.Msg) *dns.Msg {
+func (sc *SRVClient) doCacheLast(hostname string, res *dns.Msg) *dns.Msg {
 	if sc.cacheLast == nil {
 		return res
 	}
@@ -91,10 +91,10 @@ func (sc SRVClient) doCacheLast(hostname string, res *dns.Msg) *dns.Msg {
 	return res
 }
 
-func (sc SRVClient) lookupSRV(hostname string, replaceWithIPs bool) ([]*dns.SRV, error) {
+func (sc *SRVClient) clientConfig() (*dns.Client, dnsConfig, error) {
 	cfg, err := dnsGetConfig()
 	if err != nil {
-		return nil, err
+		return nil, cfg, err
 	}
 	if len(sc.ResolverAddrs) > 0 {
 		cfg.servers = sc.ResolverAddrs
@@ -108,25 +108,54 @@ func (sc SRVClient) lookupSRV(hostname string, replaceWithIPs bool) ([]*dns.SRV,
 		c.ReadTimeout = timeout
 		c.WriteTimeout = timeout
 	}
-	fqdn := dns.Fqdn(hostname)
+	return c, cfg, nil
+}
+
+func (sc *SRVClient) doExchange(c *dns.Client, fqdn, server string) *dns.Msg {
 	m := new(dns.Msg)
 	m.SetQuestion(fqdn, dns.TypeSRV)
 	m.SetEdns0(dns.DefaultMsgSize, false)
 
+	if res, _, err := c.Exchange(m, server); err != nil {
+		return nil
+	} else if res.Rcode != dns.RcodeFormatError {
+		return res
+	}
+
+	// At this point we got a response, but it was just to tell us that
+	// edns0 isn't supported, so we try again without it
+	m2 := new(dns.Msg)
+	m2.SetQuestion(fqdn, dns.TypeSRV)
+	if res, _, err := c.Exchange(m2, server); err == nil {
+		return res
+	}
+	return nil
+}
+
+func answersFromMsg(m *dns.Msg, replaceWithIPs bool) []*dns.SRV {
+	ans := make([]*dns.SRV, 0, len(m.Answer))
+	for i := range m.Answer {
+		if ansSRV, ok := m.Answer[i].(*dns.SRV); ok {
+			if replaceWithIPs {
+				// attempt to replace SRV's Target with the actual IP
+				ansSRV = replaceSRVTarget(ansSRV, m.Extra)
+			}
+			ans = append(ans, ansSRV)
+		}
+	}
+	return ans
+}
+
+func (sc *SRVClient) lookupSRV(hostname string, replaceWithIPs bool) ([]*dns.SRV, error) {
+	c, cfg, err := sc.clientConfig()
+	if err != nil {
+		return nil, err
+	}
+
+	fqdn := dns.Fqdn(hostname)
 	var res *dns.Msg
 	for _, server := range cfg.servers {
-		if res, _, err = c.Exchange(m, server); err != nil {
-			continue
-		}
-		if res.Rcode != dns.RcodeFormatError {
-			break
-		}
-
-		// At this point we got a response, but it was just to tell us that
-		// edns0 isn't supported, so we try again without it
-		m2 := new(dns.Msg)
-		m2.SetQuestion(fqdn, dns.TypeSRV)
-		if res, _, err = c.Exchange(m2, server); err == nil {
+		if res = sc.doExchange(c, fqdn, server); res != nil {
 			break
 		}
 	}
@@ -139,16 +168,7 @@ func (sc SRVClient) lookupSRV(hostname string, replaceWithIPs bool) ([]*dns.SRV,
 		return nil, errors.New("no available nameservers")
 	}
 
-	ans := make([]*dns.SRV, 0, len(res.Answer))
-	for i := range res.Answer {
-		if ansSRV, ok := res.Answer[i].(*dns.SRV); ok {
-			if replaceWithIPs {
-				// attempt to replace SRV's Target with the actual IP
-				ansSRV = replaceSRVTarget(ansSRV, res.Extra)
-			}
-			ans = append(ans, ansSRV)
-		}
-	}
+	ans := answersFromMsg(res, replaceWithIPs)
 	if len(ans) == 0 {
 		return nil, fmt.Errorf("No SRV records for %q", hostname)
 	}
@@ -177,7 +197,7 @@ func SRV(hostname string) (string, error) {
 //
 // If the given hostname already has a ":port" appended to it, only the ip will
 // be looked up from the SRV request, but the port given will be returned
-func (sc SRVClient) SRV(hostname string) (string, error) {
+func (sc *SRVClient) SRV(hostname string) (string, error) {
 	var portStr string
 	if parts := strings.Split(hostname, ":"); len(parts) == 2 {
 		hostname = parts[0]
@@ -201,7 +221,7 @@ func SRVNoPort(hostname string) (string, error) {
 
 // SRVNoPort behaves the same as SRV, but the returned address string will not
 // contain the port
-func (sc SRVClient) SRVNoPort(hostname string) (string, error) {
+func (sc *SRVClient) SRVNoPort(hostname string) (string, error) {
 	addr, err := SRV(hostname)
 	if err != nil {
 		return "", err
@@ -221,7 +241,7 @@ func AllSRV(hostname string) ([]string, error) {
 // contained a port then the port on all results will be replaced with the
 // originally-passed port
 // AllSRV will NOT replace hostnames with their respective IPs
-func (sc SRVClient) AllSRV(hostname string) ([]string, error) {
+func (sc *SRVClient) AllSRV(hostname string) ([]string, error) {
 	var ogPort string
 	if parts := strings.Split(hostname, ":"); len(parts) == 2 {
 		hostname = parts[0]
@@ -250,7 +270,7 @@ func MaybeSRV(host string) string {
 // MaybeSRV attempts a SRV lookup if the host doesn't contain a port and if the
 // SRV lookup succeeds it'll rewrite the host and return it with the lookup
 // result. If it fails it'll just return the host originally sent
-func (sc SRVClient) MaybeSRV(host string) string {
+func (sc *SRVClient) MaybeSRV(host string) string {
 	if _, p, _ := net.SplitHostPort(host); p == "" {
 		if addr, err := SRV(host); err == nil {
 			host = addr
@@ -307,7 +327,7 @@ func MaybeSRVURL(host string) string {
 }
 
 // MaybeSRVURL calls MaybeSRV and also prepends http://if no scheme was sent
-func (sc SRVClient) MaybeSRVURL(host string) string {
+func (sc *SRVClient) MaybeSRVURL(host string) string {
 	host = sc.MaybeSRV(host)
 	if !strings.Contains(host, "://") {
 		return "http://" + host
