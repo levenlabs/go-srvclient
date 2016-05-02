@@ -45,6 +45,11 @@ type SRVClient struct {
 	// list. If none are set then the resolver settings in /etc/resolv.conf are
 	// used
 	ResolverAddrs []string
+
+	// If non-nill, will be called on messages returned from dns servers prior
+	// to them being processed (i.e. before they are cached, sorted,
+	// ip-replaced, etc...)
+	Preprocess func(*dns.Msg)
 }
 
 // EnableCacheLast is used to make SRVClient cache the last successful SRV
@@ -158,6 +163,10 @@ func (sc *SRVClient) lookupSRV(hostname string, replaceWithIPs bool) ([]*dns.SRV
 		if res = sc.doExchange(c, fqdn, server); res != nil {
 			break
 		}
+	}
+
+	if sc.Preprocess != nil && res != nil {
+		sc.Preprocess(res)
 	}
 
 	// Handles caching this response if it's a successful one, or replacing res

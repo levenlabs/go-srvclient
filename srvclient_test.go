@@ -202,3 +202,16 @@ func TestMaybeSRVURL(t *T) {
 	r = MaybeSRVURL(testHostname)
 	assert.True(t, r == "http://10.0.0.1:1000" || r == "http://[2607:5300:60:92e7::1]:1001")
 }
+
+func TestPreprocess(t *T) {
+	client := SRVClient{}
+	client.ResolverAddrs = DefaultSRVClient.ResolverAddrs
+	client.Preprocess = func(m *dns.Msg) {
+		m.Answer = m.Answer[:1]
+	}
+
+	r, err := client.AllSRV(testHostname)
+	require.Nil(t, err)
+	assert.Len(t, r, 1)
+	assert.Contains(t, r, "1.srv.test.com.:1000")
+}
