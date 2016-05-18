@@ -1,8 +1,8 @@
 package srvclient
 
 import (
+	"fmt"
 	. "testing"
-
 	"time"
 
 	"github.com/miekg/dns"
@@ -179,6 +179,10 @@ func TestLastCache(t *T) {
 	_, err := cl.SRV(testHostname)
 	require.Nil(t, err)
 
+	_, err = cl.SRV("fail")
+	assert.NotNil(t, err)
+	assert.Equal(t, `No SRV records for "fail"`, err.Error())
+
 	cl.ResolverAddrs = nil
 
 	r, err := cl.SRV(testHostname)
@@ -189,6 +193,7 @@ func TestLastCache(t *T) {
 	cl.cacheLast = nil
 	_, err = cl.SRV(testHostname)
 	assert.NotNil(t, err)
+	assert.Equal(t, fmt.Sprintf(`No SRV records for "%s"`, testHostname), err.Error())
 }
 
 func TestMaybeSRVURL(t *T) {

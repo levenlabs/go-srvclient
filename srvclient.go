@@ -87,7 +87,10 @@ func (sc *SRVClient) doCacheLast(hostname string, res *dns.Msg) *dns.Msg {
 	if res == nil || len(res.Answer) == 0 {
 		sc.cacheLastL.RLock()
 		defer sc.cacheLastL.RUnlock()
-		return sc.cacheLast[hostname]
+		if cres, ok := sc.cacheLast[hostname]; ok {
+			res = cres
+		}
+		return res
 	}
 
 	sc.cacheLastL.Lock()
