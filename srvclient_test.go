@@ -219,4 +219,11 @@ func TestPreprocess(t *T) {
 	require.Nil(t, err)
 	assert.Len(t, r, 1)
 	assert.Contains(t, r, "1.srv.test.com.:1000")
+
+	str := client.MaybeSRV(testHostname)
+	assert.Equal(t, str, "10.0.0.1:1000")
+
+	str, err = client.SRVNoPort(testHostname)
+	require.Nil(t, err)
+	assert.Equal(t, str, "10.0.0.1")
 }

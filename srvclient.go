@@ -234,7 +234,7 @@ func SRVNoPort(hostname string) (string, error) {
 // SRVNoPort behaves the same as SRV, but the returned address string will not
 // contain the port
 func (sc *SRVClient) SRVNoPort(hostname string) (string, error) {
-	addr, err := SRV(hostname)
+	addr, err := sc.SRV(hostname)
 	if err != nil {
 		return "", err
 	}
@@ -284,7 +284,7 @@ func MaybeSRV(host string) string {
 // result. If it fails it'll just return the host originally sent
 func (sc *SRVClient) MaybeSRV(host string) string {
 	if _, p, _ := net.SplitHostPort(host); p == "" {
-		if addr, err := SRV(host); err == nil {
+		if addr, err := sc.SRV(host); err == nil {
 			host = addr
 		}
 	}
@@ -338,7 +338,7 @@ func MaybeSRVURL(host string) string {
 	return DefaultSRVClient.MaybeSRVURL(host)
 }
 
-// MaybeSRVURL calls MaybeSRV and also prepends http://if no scheme was sent
+// MaybeSRVURL calls MaybeSRV and also prepends http:// if no scheme was sent
 func (sc *SRVClient) MaybeSRVURL(host string) string {
 	host = sc.MaybeSRV(host)
 	if !strings.Contains(host, "://") {

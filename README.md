@@ -7,6 +7,8 @@ request against it. It wil then look at all the returned entries and make a
 weighted random choice of one of them, returning a string which is the
 `"host:port"` of the picked entry.
 
+Does not work on Windows.
+
 ## Install
 
     go get github.com/levenlabs/go-srvclient
