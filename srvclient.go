@@ -36,7 +36,8 @@ func init() {
 	go dnsConfigLoop()
 }
 
-// SRVClient is a holder for methods related to SRV lookups
+// SRVClient is a holder for methods related to SRV lookups. Use new(SRVClient)
+// to initialize one.
 type SRVClient struct {
 	cacheLast  map[string]*dns.Msg
 	cacheLastL sync.RWMutex
@@ -66,7 +67,7 @@ func (sc *SRVClient) EnableCacheLast() {
 // DefaultSRVClient is an instance of SRVClient with all zero'd values, used as
 // the default client for all global methods. It can be overwritten prior to any
 // of the methods being used in order to modify their behavior
-var DefaultSRVClient SRVClient
+var DefaultSRVClient = new(SRVClient)
 
 func replaceSRVTarget(r *dns.SRV, extra []dns.RR) *dns.SRV {
 	for _, e := range extra {

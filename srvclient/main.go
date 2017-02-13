@@ -28,7 +28,7 @@ func main() {
 		exit(1)
 	}
 
-	sc := srvclient.SRVClient{}
+	sc := new(srvclient.SRVClient)
 	resolvers, _ := l.ParamStr("--resolvers")
 	for _, r := range strings.Split(resolvers, ",") {
 		if net.ParseIP(r) != nil {
