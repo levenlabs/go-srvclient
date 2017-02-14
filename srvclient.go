@@ -42,6 +42,10 @@ type SRVClient struct {
 	cacheLast  map[string]*dns.Msg
 	cacheLastL sync.RWMutex
 
+	client        *dns.Client
+	lastDNSConfig dnsConfig
+	clientConfigL sync.RWMutex
+
 	// A list of addresses ("ip:port") which should be used as the resolver
 	// list. If none are set then the resolver settings in /etc/resolv.conf are
 	// used
@@ -100,24 +104,35 @@ func (sc *SRVClient) doCacheLast(hostname string, res *dns.Msg) *dns.Msg {
 	return res
 }
 
-func (sc *SRVClient) clientConfig() (*dns.Client, dnsConfig, error) {
-	cfg, err := dnsGetConfig()
-	if err != nil {
-		return nil, cfg, err
-	}
-	if len(sc.ResolverAddrs) > 0 {
-		cfg.servers = sc.ResolverAddrs
-	}
-
+func (sc *SRVClient) newClient(cfg dnsConfig) *dns.Client {
 	c := new(dns.Client)
 	c.UDPSize = dns.DefaultMsgSize
+	c.SingleInflight = true
 	if cfg.timeout > 0 {
 		timeout := time.Duration(cfg.timeout) * time.Second
 		c.DialTimeout = timeout
 		c.ReadTimeout = timeout
 		c.WriteTimeout = timeout
 	}
-	return c, cfg, nil
+	return c
+}
+
+func (sc *SRVClient) clientConfig() (*dns.Client, dnsConfig, error) {
+	cfg, err := dnsGetConfig()
+	if err != nil {
+		return nil, cfg, err
+	} else if len(sc.ResolverAddrs) > 0 {
+		cfg.servers = sc.ResolverAddrs
+	}
+
+	sc.clientConfigL.Lock()
+	defer sc.clientConfigL.Unlock()
+	if sc.client == nil || !sc.lastDNSConfig.equal(cfg) {
+		sc.client = sc.newClient(cfg)
+		sc.lastDNSConfig = cfg
+	}
+
+	return sc.client, sc.lastDNSConfig, nil
 }
 
 func (sc *SRVClient) doExchange(c *dns.Client, fqdn, server string) *dns.Msg {

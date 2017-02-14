@@ -34,6 +34,7 @@ package srvclient
 import (
 	"net"
 	"os"
+	"reflect"
 	"time"
 )
 
@@ -88,6 +89,10 @@ type dnsConfig struct {
 	timeout  int      // seconds before giving up on packet
 	attempts int      // lost packets before giving up on server
 	rotate   bool     // round robin among servers
+}
+
+func (cfg dnsConfig) equal(cfg2 dnsConfig) bool {
+	return reflect.DeepEqual(cfg, cfg2)
 }
 
 // See resolv.conf(5) on a Linux machine.
