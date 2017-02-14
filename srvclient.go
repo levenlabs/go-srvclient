@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"math/rand"
+	"reflect"
 	"strconv"
 	"strings"
 	"sync"
@@ -43,7 +44,7 @@ type SRVClient struct {
 	cacheLastL sync.RWMutex
 
 	client        *dns.Client
-	lastDNSConfig dnsConfig
+	lastConfig    dns.ClientConfig
 	clientConfigL sync.RWMutex
 
 	// A list of addresses ("ip:port") which should be used as the resolver
@@ -104,12 +105,12 @@ func (sc *SRVClient) doCacheLast(hostname string, res *dns.Msg) *dns.Msg {
 	return res
 }
 
-func (sc *SRVClient) newClient(cfg dnsConfig) *dns.Client {
+func (sc *SRVClient) newClient(cfg dns.ClientConfig) *dns.Client {
 	c := new(dns.Client)
 	c.UDPSize = dns.DefaultMsgSize
 	c.SingleInflight = true
-	if cfg.timeout > 0 {
-		timeout := time.Duration(cfg.timeout) * time.Second
+	if cfg.Timeout > 0 {
+		timeout := time.Duration(cfg.Timeout) * time.Second
 		c.DialTimeout = timeout
 		c.ReadTimeout = timeout
 		c.WriteTimeout = timeout
@@ -117,22 +118,22 @@ func (sc *SRVClient) newClient(cfg dnsConfig) *dns.Client {
 	return c
 }
 
-func (sc *SRVClient) clientConfig() (*dns.Client, dnsConfig, error) {
+func (sc *SRVClient) clientConfig() (*dns.Client, dns.ClientConfig, error) {
 	cfg, err := dnsGetConfig()
 	if err != nil {
 		return nil, cfg, err
 	} else if len(sc.ResolverAddrs) > 0 {
-		cfg.servers = sc.ResolverAddrs
+		cfg.Servers = sc.ResolverAddrs
 	}
 
 	sc.clientConfigL.Lock()
 	defer sc.clientConfigL.Unlock()
-	if sc.client == nil || !sc.lastDNSConfig.equal(cfg) {
+	if sc.client == nil || !reflect.DeepEqual(sc.lastConfig, cfg) {
 		sc.client = sc.newClient(cfg)
-		sc.lastDNSConfig = cfg
+		sc.lastConfig = cfg
 	}
 
-	return sc.client, sc.lastDNSConfig, nil
+	return sc.client, sc.lastConfig, nil
 }
 
 func (sc *SRVClient) doExchange(c *dns.Client, fqdn, server string) *dns.Msg {
@@ -178,7 +179,7 @@ func (sc *SRVClient) lookupSRV(hostname string, replaceWithIPs bool) ([]*dns.SRV
 
 	fqdn := dns.Fqdn(hostname)
 	var res *dns.Msg
-	for _, server := range cfg.servers {
+	for _, server := range cfg.Servers {
 		if res = sc.doExchange(c, fqdn, server); res != nil {
 			break
 		}
