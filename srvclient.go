@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"math/rand"
+	"reflect"
 	"strconv"
 	"strings"
 	"sync"
@@ -41,6 +42,10 @@ func init() {
 type SRVClient struct {
 	cacheLast  map[string]*dns.Msg
 	cacheLastL sync.RWMutex
+
+	client        *dns.Client
+	lastConfig    dns.ClientConfig
+	clientConfigL sync.RWMutex
 
 	// A list of addresses ("ip:port") which should be used as the resolver
 	// list. If none are set then the resolver settings in /etc/resolv.conf are
@@ -100,24 +105,35 @@ func (sc *SRVClient) doCacheLast(hostname string, res *dns.Msg) *dns.Msg {
 	return res
 }
 
-func (sc *SRVClient) clientConfig() (*dns.Client, dnsConfig, error) {
-	cfg, err := dnsGetConfig()
-	if err != nil {
-		return nil, cfg, err
-	}
-	if len(sc.ResolverAddrs) > 0 {
-		cfg.servers = sc.ResolverAddrs
-	}
-
+func (sc *SRVClient) newClient(cfg dns.ClientConfig) *dns.Client {
 	c := new(dns.Client)
 	c.UDPSize = dns.DefaultMsgSize
-	if cfg.timeout > 0 {
-		timeout := time.Duration(cfg.timeout) * time.Second
+	c.SingleInflight = true
+	if cfg.Timeout > 0 {
+		timeout := time.Duration(cfg.Timeout) * time.Second
 		c.DialTimeout = timeout
 		c.ReadTimeout = timeout
 		c.WriteTimeout = timeout
 	}
-	return c, cfg, nil
+	return c
+}
+
+func (sc *SRVClient) clientConfig() (*dns.Client, dns.ClientConfig, error) {
+	cfg, err := dnsGetConfig()
+	if err != nil {
+		return nil, cfg, err
+	} else if len(sc.ResolverAddrs) > 0 {
+		cfg.Servers = sc.ResolverAddrs
+	}
+
+	sc.clientConfigL.Lock()
+	defer sc.clientConfigL.Unlock()
+	if sc.client == nil || !reflect.DeepEqual(sc.lastConfig, cfg) {
+		sc.client = sc.newClient(cfg)
+		sc.lastConfig = cfg
+	}
+
+	return sc.client, sc.lastConfig, nil
 }
 
 func (sc *SRVClient) doExchange(c *dns.Client, fqdn, server string) *dns.Msg {
@@ -163,7 +179,7 @@ func (sc *SRVClient) lookupSRV(hostname string, replaceWithIPs bool) ([]*dns.SRV
 
 	fqdn := dns.Fqdn(hostname)
 	var res *dns.Msg
-	for _, server := range cfg.servers {
+	for _, server := range cfg.Servers {
 		if res = sc.doExchange(c, fqdn, server); res != nil {
 			break
 		}

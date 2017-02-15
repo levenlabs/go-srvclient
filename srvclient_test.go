@@ -172,7 +172,7 @@ func TestMaybeSRV(t *T) {
 }
 
 func TestLastCache(t *T) {
-	cl := SRVClient{}
+	cl := new(SRVClient)
 	cl.EnableCacheLast()
 	cl.ResolverAddrs = DefaultSRVClient.ResolverAddrs
 
