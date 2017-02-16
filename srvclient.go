@@ -226,11 +226,18 @@ func SRV(hostname string) (string, error) {
 //
 // If the given hostname already has a ":port" appended to it, only the ip will
 // be looked up from the SRV request, but the port given will be returned
+//
+// If the given hostname is "ip:port", it'll just immediately return what you
+// sent.
 func (sc *SRVClient) SRV(hostname string) (string, error) {
 	var portStr string
-	if parts := strings.Split(hostname, ":"); len(parts) == 2 {
-		hostname = parts[0]
-		portStr = parts[1]
+	if h, p, _ := net.SplitHostPort(hostname); p != "" && h != "" {
+		// check for host being an IP and if so, just return what they sent
+		if ip := net.ParseIP(h); ip != nil {
+			return hostname, nil
+		}
+		hostname = h
+		portStr = p
 	}
 
 	ans, err := sc.lookupSRV(hostname, true)

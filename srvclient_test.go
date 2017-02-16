@@ -98,6 +98,10 @@ func TestSRV(t *T) {
 	r, err = SRV(testHostname + ":9999")
 	require.Nil(t, err)
 	assert.True(t, r == "10.0.0.1:9999" || r == "[2607:5300:60:92e7::1]:9999")
+
+	r, err = SRV("10.0.0.2:9999")
+	require.Nil(t, err)
+	assert.Equal(t, "10.0.0.2:9999", r)
 }
 
 func TestSRVNoPort(t *T) {
