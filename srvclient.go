@@ -6,7 +6,6 @@ package srvclient
 
 import (
 	"errors"
-	"fmt"
 	"math/rand"
 	"reflect"
 	"strconv"
@@ -199,7 +198,7 @@ func (sc *SRVClient) lookupSRV(hostname string, replaceWithIPs bool) ([]*dns.SRV
 
 	ans := answersFromMsg(res, replaceWithIPs)
 	if len(ans) == 0 {
-		return nil, fmt.Errorf("No SRV records for %q", hostname)
+		return nil, &ErrNotFound{hostname}
 	}
 
 	return ans, nil
