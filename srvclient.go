@@ -45,6 +45,7 @@ type SRVClient struct {
 	client        *dns.Client
 	lastConfig    dns.ClientConfig
 	clientConfigL sync.RWMutex
+	UDPSize       uint16
 
 	// A list of addresses ("ip:port") which should be used as the resolver
 	// list. If none are set then the resolver settings in /etc/resolv.conf are
@@ -106,7 +107,11 @@ func (sc *SRVClient) doCacheLast(hostname string, res *dns.Msg) *dns.Msg {
 
 func (sc *SRVClient) newClient(cfg dns.ClientConfig) *dns.Client {
 	c := new(dns.Client)
-	c.UDPSize = dns.DefaultMsgSize
+	if sc.UDPSize != 0 {
+		c.UDPSize = sc.UDPSize
+	} else {
+		c.UDPSize = dns.DefaultMsgSize
+	}
 	c.SingleInflight = true
 	if cfg.Timeout > 0 {
 		timeout := time.Duration(cfg.Timeout) * time.Second
@@ -135,25 +140,28 @@ func (sc *SRVClient) clientConfig() (*dns.Client, dns.ClientConfig, error) {
 	return sc.client, sc.lastConfig, nil
 }
 
-func (sc *SRVClient) doExchange(c *dns.Client, fqdn, server string) *dns.Msg {
+func (sc *SRVClient) doExchange(c *dns.Client, fqdn, server string) (*dns.Msg, error) {
 	m := new(dns.Msg)
 	m.SetQuestion(fqdn, dns.TypeSRV)
-	m.SetEdns0(dns.DefaultMsgSize, false)
+	if c.UDPSize != 0 {
+		m.SetEdns0(c.UDPSize, false)
+	}
 
-	if res, _, err := c.Exchange(m, server); err != nil {
-		return nil
-	} else if res.Rcode != dns.RcodeFormatError {
-		return res
+	res, _, err := c.Exchange(m, server)
+	if err != nil {
+		// return the res also in case it was a truncation error
+		return res, err
+	}
+	if res.Rcode != dns.RcodeFormatError || c.UDPSize == 0 {
+		return res, nil
 	}
 
 	// At this point we got a response, but it was just to tell us that
 	// edns0 isn't supported, so we try again without it
 	m2 := new(dns.Msg)
 	m2.SetQuestion(fqdn, dns.TypeSRV)
-	if res, _, err := c.Exchange(m2, server); err == nil {
-		return res
-	}
-	return nil
+	res, _, err = c.Exchange(m2, server)
+	return res, err
 }
 
 func answersFromMsg(m *dns.Msg, replaceWithIPs bool) []*dns.SRV {
@@ -178,22 +186,46 @@ func (sc *SRVClient) lookupSRV(hostname string, replaceWithIPs bool) ([]*dns.SRV
 
 	fqdn := dns.Fqdn(hostname)
 	var res *dns.Msg
+	var tres *dns.Msg
 	for _, server := range cfg.Servers {
-		if res = sc.doExchange(c, fqdn, server); res != nil {
-			break
+		res, err = sc.doExchange(c, fqdn, server)
+		if err == dns.ErrTruncated && res != nil {
+			tres = res
+			continue
 		}
+		if err != nil || res == nil {
+			continue
+		}
+		// no error so stop
+		break
 	}
 
-	if sc.Preprocess != nil && res != nil {
-		sc.Preprocess(res)
+	if sc.Preprocess != nil {
+		// preprocess both since we don't know which one we'll use yet
+		if res != nil {
+			sc.Preprocess(res)
+		}
+		if tres != nil {
+			sc.Preprocess(tres)
+		}
 	}
 
 	// Handles caching this response if it's a successful one, or replacing res
 	// with the last response if not. Does nothing if sc.cacheLast is false.
 	res = sc.doCacheLast(hostname, res)
 
+	// if we got a truncated error from a server but it was a success, use it
+	// we check this AFTER the cache in case we have a better one in the cache
+	if res != nil && res.Rcode != dns.RcodeSuccess && tres != nil && tres.Rcode == dns.RcodeSuccess {
+		res = tres
+		err = dns.ErrTruncated
+	}
+
 	if res == nil {
-		return nil, errors.New("no available nameservers")
+		if err == nil {
+			err = errors.New("no available nameservers")
+		}
+		return nil, err
 	}
 
 	ans := answersFromMsg(res, replaceWithIPs)
@@ -201,7 +233,7 @@ func (sc *SRVClient) lookupSRV(hostname string, replaceWithIPs bool) ([]*dns.SRV
 		return nil, &ErrNotFound{hostname}
 	}
 
-	return ans, nil
+	return ans, err
 }
 
 func srvToStr(srv *dns.SRV, port string) string {
@@ -240,13 +272,14 @@ func (sc *SRVClient) SRV(hostname string) (string, error) {
 	}
 
 	ans, err := sc.lookupSRV(hostname, true)
-	if err != nil {
+	// ignore truncated errors unless there were no answers
+	if err != nil && (err != dns.ErrTruncated || len(ans) == 0) {
 		return "", err
 	}
 
 	srv := pickSRV(ans)
 
-	return srvToStr(srv, portStr), nil
+	return srvToStr(srv, portStr), err
 }
 
 // SRVNoPort calls the SRVNoPort method on the DefaultSRVClient
@@ -284,7 +317,8 @@ func (sc *SRVClient) AllSRV(hostname string) ([]string, error) {
 	}
 
 	ans, err := sc.lookupSRV(hostname, false)
-	if err != nil {
+	// ignore truncated errors unless there were no answers
+	if err != nil && (err != dns.ErrTruncated || len(ans) == 0) {
 		return nil, err
 	}
 
@@ -294,7 +328,7 @@ func (sc *SRVClient) AllSRV(hostname string) ([]string, error) {
 	for i := range ans {
 		res[i] = srvToStr(ans[i], ogPort)
 	}
-	return res, nil
+	return res, err
 }
 
 // MaybeSRV calls the MaybeSRV method on the DefaultSRVClient
