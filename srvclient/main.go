@@ -7,6 +7,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/miekg/dns"
+
 	"github.com/levenlabs/go-srvclient"
 	"github.com/mediocregopher/lever"
 )
@@ -19,6 +21,12 @@ func main() {
 	l.Add(lever.Param{
 		Name:        "--resolvers",
 		Description: "Comma separated list of resolver ips or addresses (ip:port) which should be used instead of /etc/resolv.conf",
+	})
+	l.Add(lever.Param{
+		// this matches the flag for dig
+		Name:        "--ignore",
+		Description: "Whether to ignore truncated responses",
+		Flag:        true,
 	})
 	l.Parse()
 	argv := l.ParamRest()
@@ -39,9 +47,10 @@ func main() {
 		}
 	}
 
+	ignore := l.ParamFlag("--ignore")
 	r, err := sc.SRV(argv[0])
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "error resolving %q: %s\n", os.Args[1], err)
+	if err != nil && (err != dns.ErrTruncated || !ignore || r == "") {
+		fmt.Fprintf(os.Stderr, "error resolving %q: %s\n", argv[0], err)
 		os.Exit(2)
 	}
 

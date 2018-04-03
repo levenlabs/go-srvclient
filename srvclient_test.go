@@ -9,8 +9,9 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-var testHostname = "srv.test.com"
-var testHostnameNoSRV = "test.com"
+var testHostname = "srv.test.test"
+var testHostnameNoSRV = "test.test"
+var testHostnameTruncated = "trunc.test.test"
 
 func init() {
 	rr := func(s string) dns.RR {
@@ -21,19 +22,29 @@ func init() {
 	handleRequest := func(w dns.ResponseWriter, r *dns.Msg) {
 		m := new(dns.Msg)
 		m.SetRcode(r, dns.RcodeSuccess)
-		if r.Question[0].Name == "srv.test.com." {
+		if r.Question[0].Name == dns.Fqdn(testHostname) {
 			m.Answer = []dns.RR{
-				rr("srv.test.com. 60 IN SRV 0 0 1000 1.srv.test.com."),
-				rr("srv.test.com. 60 IN SRV 0 0 1001 2.srv.test.com."),
+				rr("srv.test. 60 IN SRV 0 0 1000 1.srv.test."),
+				rr("srv.test. 60 IN SRV 0 0 1001 2.srv.test."),
 			}
 			m.Extra = []dns.RR{
-				rr("1.srv.test.com. 60 IN A 10.0.0.1"),
-				rr("2.srv.test.com. 60 IN AAAA 2607:5300:60:92e7::1"),
+				rr("1.srv.test. 60 IN A 10.0.0.1"),
+				rr("2.srv.test. 60 IN AAAA 2607:5300:60:92e7::1"),
 			}
-		} else if r.Question[0].Name == "test.com." {
+		} else if r.Question[0].Name == dns.Fqdn(testHostnameNoSRV) {
 			m.Answer = []dns.RR{
-				rr("test.com. 60 IN A 11.0.0.1"),
+				rr("test.test. 60 IN A 11.0.0.1"),
 			}
+		} else if r.Question[0].Name == dns.Fqdn(testHostnameTruncated) {
+			m.Answer = []dns.RR{
+				rr("srv.test. 60 IN SRV 0 0 1000 1.srv.test."),
+				rr("srv.test. 60 IN SRV 0 0 1001 2.srv.test."),
+			}
+			m.Extra = []dns.RR{
+				rr("1.srv.test. 60 IN A 10.0.0.1"),
+				rr("2.srv.test. 60 IN AAAA 2607:5300:60:92e7::1"),
+			}
+			m.Truncated = true
 		}
 		w.WriteMsg(m)
 	}
@@ -54,7 +65,7 @@ func init() {
 	server.ListenAndServe()
 
 	//override ResolverAddrs with our own server we just started
-	DefaultSRVClient.ResolverAddrs = []string{server.PacketConn.LocalAddr().String()}
+	DefaultSRVClient.ResolverAddrs = []string{server.PacketConn.LocalAddr().String(), "8.8.8.8:53"}
 }
 
 func testDistr(srvs []*dns.SRV) map[string]int {
@@ -80,8 +91,8 @@ func TestLookupSRV(t *T) {
 
 	rr, err := DefaultSRVClient.lookupSRV(testHostname, false)
 	require.Nil(t, err)
-	assertHasSRV("1.srv.test.com.", 1000, rr)
-	assertHasSRV("2.srv.test.com.", 1001, rr)
+	assertHasSRV("1.srv.test.", 1000, rr)
+	assertHasSRV("2.srv.test.", 1001, rr)
 
 	rr, err = DefaultSRVClient.lookupSRV(testHostname, true)
 	require.Nil(t, err)
@@ -103,6 +114,13 @@ func TestSRV(t *T) {
 	assert.Equal(t, "10.0.0.2:9999", r)
 }
 
+func TestSRVTruncated(t *T) {
+	// these should hit local and then google but we should prefer local
+	r, err := SRV(testHostnameTruncated)
+	assert.Equal(t, dns.ErrTruncated, err)
+	assert.True(t, r == "10.0.0.1:1000" || r == "[2607:5300:60:92e7::1]:1001")
+}
+
 func TestSRVNoPort(t *T) {
 	r, err := SRVNoPort(testHostname)
 	require.Nil(t, err)
@@ -113,14 +131,14 @@ func TestAllSRV(t *T) {
 	r, err := AllSRV(testHostname)
 	require.Nil(t, err)
 	assert.Len(t, r, 2)
-	assert.Contains(t, r, "1.srv.test.com.:1000")
-	assert.Contains(t, r, "2.srv.test.com.:1001")
+	assert.Contains(t, r, "1.srv.test.:1000")
+	assert.Contains(t, r, "2.srv.test.:1001")
 
 	r, err = AllSRV(testHostname + ":9999")
 	require.Nil(t, err)
 	assert.Len(t, r, 2)
-	assert.Contains(t, r, "1.srv.test.com.:9999")
-	assert.Contains(t, r, "2.srv.test.com.:9999")
+	assert.Contains(t, r, "1.srv.test.:9999")
+	assert.Contains(t, r, "2.srv.test.:9999")
 }
 
 func TestPickSRV(t *T) {
@@ -221,7 +239,7 @@ func TestPreprocess(t *T) {
 	r, err := client.AllSRV(testHostname)
 	require.Nil(t, err)
 	assert.Len(t, r, 1)
-	assert.Contains(t, r, "1.srv.test.com.:1000")
+	assert.Contains(t, r, "1.srv.test.:1000")
 
 	str := client.MaybeSRV(testHostname)
 	assert.Equal(t, str, "10.0.0.1:1000")
