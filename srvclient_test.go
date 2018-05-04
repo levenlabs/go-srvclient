@@ -114,6 +114,16 @@ func TestSRV(t *T) {
 	assert.Equal(t, "10.0.0.2:9999", r)
 }
 
+func TestSRVNoTranslate(t *T) {
+	r, err := SRVNoTranslate(testHostname)
+	require.Nil(t, err)
+	assert.True(t, r == "1.srv.test.:1000" || r == "2.srv.test.:1001")
+
+	r, err = SRV("10.0.0.2:9999")
+	require.Nil(t, err)
+	assert.Equal(t, "10.0.0.2:9999", r)
+}
+
 func TestSRVTruncated(t *T) {
 	// these should hit local and then google but we should prefer local
 	r, err := SRV(testHostnameTruncated)

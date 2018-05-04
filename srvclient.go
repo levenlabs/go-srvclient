@@ -248,6 +248,28 @@ func SRV(hostname string) (string, error) {
 	return DefaultSRVClient.SRV(hostname)
 }
 
+func (sc *SRVClient) srv(hostname string, replaceWithIPs bool) (string, error) {
+	var portStr string
+	if h, p, _ := net.SplitHostPort(hostname); p != "" && h != "" {
+		// check for host being an IP and if so, just return what they sent
+		if ip := net.ParseIP(h); ip != nil {
+			return hostname, nil
+		}
+		hostname = h
+		portStr = p
+	}
+
+	ans, err := sc.lookupSRV(hostname, replaceWithIPs)
+	// ignore truncated errors unless there were no answers
+	if err != nil && (err != dns.ErrTruncated || len(ans) == 0) {
+		return "", err
+	}
+
+	srv := pickSRV(ans)
+
+	return srvToStr(srv, portStr), err
+}
+
 // SRV will perform a SRV request on the given hostname, and then choose one of
 // the returned entries randomly based on the priority and weight fields it
 // sees. It will return the address ("host:port") of the winning entry, or an
@@ -261,25 +283,18 @@ func SRV(hostname string) (string, error) {
 // If the given hostname is "ip:port", it'll just immediately return what you
 // sent.
 func (sc *SRVClient) SRV(hostname string) (string, error) {
-	var portStr string
-	if h, p, _ := net.SplitHostPort(hostname); p != "" && h != "" {
-		// check for host being an IP and if so, just return what they sent
-		if ip := net.ParseIP(h); ip != nil {
-			return hostname, nil
-		}
-		hostname = h
-		portStr = p
-	}
+	return sc.srv(hostname, true)
+}
 
-	ans, err := sc.lookupSRV(hostname, true)
-	// ignore truncated errors unless there were no answers
-	if err != nil && (err != dns.ErrTruncated || len(ans) == 0) {
-		return "", err
-	}
+// SRVNoTranslate calls the SRVNoTranslate method on the DefaultSRVClient
+func SRVNoTranslate(hostname string) (string, error) {
+	return DefaultSRVClient.SRVNoTranslate(hostname)
+}
 
-	srv := pickSRV(ans)
-
-	return srvToStr(srv, portStr), err
+// SRVNoTranslate is exactly like SRV except it won't translate names to their
+// respective IPs
+func (sc *SRVClient) SRVNoTranslate(hostname string) (string, error) {
+	return sc.srv(hostname, false)
 }
 
 // SRVNoPort calls the SRVNoPort method on the DefaultSRVClient
