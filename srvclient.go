@@ -19,19 +19,6 @@ import (
 	"github.com/miekg/dns"
 )
 
-// sortableSRV implements sort.Interface for []*dns.SRV based on
-// the Priority and Weight fields
-type sortableSRV []*dns.SRV
-
-func (a sortableSRV) Len() int      { return len(a) }
-func (a sortableSRV) Swap(i, j int) { a[i], a[j] = a[j], a[i] }
-func (a sortableSRV) Less(i, j int) bool {
-	if a[i].Priority == a[j].Priority {
-		return a[i].Weight > a[j].Weight
-	}
-	return a[i].Priority < a[j].Priority
-}
-
 func init() {
 	go dnsConfigLoop()
 }
@@ -337,7 +324,15 @@ func (sc *SRVClient) AllSRV(hostname string) ([]string, error) {
 		return nil, err
 	}
 
-	sort.Sort(sortableSRV(ans))
+	// sort the lowest priority to the front and if priorities match
+	// sort the highest weights to the front
+	// use a stable sort in case the server's order is meaningful
+	sort.SliceStable(ans, func(i, j int) bool {
+		if ans[i].Priority == ans[j].Priority {
+			return ans[i].Weight > ans[j].Weight
+		}
+		return ans[i].Priority < ans[j].Priority
+	})
 
 	res := make([]string, len(ans))
 	for i := range ans {
