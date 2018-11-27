@@ -49,23 +49,62 @@ func init() {
 		w.WriteMsg(m)
 	}
 
+	tcpHandleRequest := func(w dns.ResponseWriter, r *dns.Msg) {
+		if r.Question[0].Name == dns.Fqdn(testHostnameTruncated) {
+			m := new(dns.Msg)
+			m.SetRcode(r, dns.RcodeSuccess)
+			m.Answer = []dns.RR{
+				rr("srv.test. 60 IN SRV 0 0 1000 1.srv.test."),
+				rr("srv.test. 60 IN SRV 0 0 1001 2.srv.test."),
+			}
+			m.Extra = []dns.RR{
+				rr("1.srv.test. 60 IN A 10.0.0.2"),
+				rr("2.srv.test. 60 IN AAAA 2607:5300:60:92e7::2"),
+			}
+			w.WriteMsg(m)
+			return
+		}
+		handleRequest(w, r)
+	}
+
+	// start udp
 	server := &dns.Server{
 		Addr:    ":0",
 		Net:     "udp",
 		Handler: dns.HandlerFunc(handleRequest),
 	}
-	go func() {
-		err := server.ListenAndServe()
-		panic(err)
-	}()
-	// give the goroutine a chance to start
-	<-time.After(100 * time.Millisecond)
-	// immediately call this again since this will block until the previous call
-	// is finished
-	server.ListenAndServe()
+	{
+		go func() {
+			panic(server.ListenAndServe())
+		}()
+		// give the goroutine a chance to start
+		<-time.After(100 * time.Millisecond)
+		// immediately call this again since this will block until the previous call
+		// is finished
+		server.ListenAndServe()
+	}
+
+	addr := server.PacketConn.LocalAddr().String()
+
+	// start tcp
+	{
+		tcpServer := &dns.Server{
+			Addr:    addr,
+			Net:     "tcp",
+			Handler: dns.HandlerFunc(tcpHandleRequest),
+		}
+		go func() {
+			panic(tcpServer.ListenAndServe())
+		}()
+		// give the goroutine a chance to start
+		<-time.After(100 * time.Millisecond)
+		// immediately call this again since this will block until the previous call
+		// is finished
+		tcpServer.ListenAndServe()
+	}
 
 	//override ResolverAddrs with our own server we just started
-	DefaultSRVClient.ResolverAddrs = []string{server.PacketConn.LocalAddr().String(), "8.8.8.8:53"}
+	DefaultSRVClient.ResolverAddrs = []string{addr, "8.8.8.8:53"}
 }
 
 func testDistr(srvs []*dns.SRV) map[string]int {
@@ -126,9 +165,16 @@ func TestSRVNoTranslate(t *T) {
 
 func TestSRVTruncated(t *T) {
 	// these should hit local and then google but we should prefer local
+	DefaultSRVClient.IgnoreTruncated = true
 	r, err := SRV(testHostnameTruncated)
-	assert.Equal(t, dns.ErrTruncated, err)
+	require.Nil(t, err)
 	assert.True(t, r == "10.0.0.1:1000" || r == "[2607:5300:60:92e7::1]:1001")
+
+	// this should hit local over tcp and use that
+	DefaultSRVClient.IgnoreTruncated = false
+	r, err = SRV(testHostnameTruncated)
+	require.Nil(t, err)
+	assert.True(t, r == "10.0.0.2:1000" || r == "[2607:5300:60:92e7::2]:1001")
 }
 
 func TestSRVNoPort(t *T) {
@@ -215,6 +261,8 @@ func TestLastCache(t *T) {
 	assert.IsType(t, &ErrNotFound{}, err)
 
 	cl.ResolverAddrs = nil
+	// force an update of the config
+	cl.lastConfig.updated = time.Time{}
 
 	r, err := cl.SRV(testHostname)
 	require.Nil(t, err)
