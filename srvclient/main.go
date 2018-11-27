@@ -7,8 +7,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/miekg/dns"
-
 	"github.com/levenlabs/go-srvclient"
 	"github.com/mediocregopher/lever"
 )
@@ -48,8 +46,11 @@ func main() {
 	}
 
 	ignore := l.ParamFlag("--ignore")
+	if ignore {
+		sc.IgnoreTruncated = true
+	}
 	r, err := sc.SRV(argv[0])
-	if err != nil && (err != dns.ErrTruncated || !ignore || r == "") {
+	if err != nil {
 		fmt.Fprintf(os.Stderr, "error resolving %q: %s\n", argv[0], err)
 		os.Exit(2)
 	}

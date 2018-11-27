@@ -7,10 +7,10 @@ package srvclient
 import (
 	"errors"
 	"math/rand"
-	"reflect"
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"net"
@@ -30,19 +30,29 @@ type SRVClient struct {
 	cacheLastL sync.RWMutex
 
 	client        *dns.Client
-	lastConfig    dns.ClientConfig
+	tcpClient     *dns.Client
+	lastConfig    clientConfig
 	clientConfigL sync.RWMutex
 	UDPSize       uint16
 
+	// If IgnoreTruncated is true, then lookups will NOT fallback to TCP when
+	// they were truncated over UDP.
+	IgnoreTruncated bool
+
 	// A list of addresses ("ip:port") which should be used as the resolver
 	// list. If none are set then the resolver settings in /etc/resolv.conf are
-	// used
+	// used. This can only be updated before the SRVClient is used for the first
+	// time.
 	ResolverAddrs []string
 
 	// If non-nill, will be called on messages returned from dns servers prior
 	// to them being processed (i.e. before they are cached, sorted,
 	// ip-replaced, etc...)
 	Preprocess func(*dns.Msg)
+
+	numUDPQueries         int64
+	numTCPQueries         int64
+	numTruncatedResponses int64
 }
 
 // EnableCacheLast is used to make SRVClient cache the last successful SRV
@@ -109,37 +119,47 @@ func (sc *SRVClient) newClient(cfg dns.ClientConfig) *dns.Client {
 	return c
 }
 
-func (sc *SRVClient) clientConfig() (*dns.Client, dns.ClientConfig, error) {
+func (sc *SRVClient) clientConfig() (*dns.Client, *dns.Client, dns.ClientConfig, error) {
 	cfg, err := dnsGetConfig()
 	if err != nil {
-		return nil, cfg, err
-	} else if len(sc.ResolverAddrs) > 0 {
+		return nil, nil, cfg.ClientConfig, err
+	}
+	if len(sc.ResolverAddrs) > 0 {
 		cfg.Servers = sc.ResolverAddrs
 	}
 
-	sc.clientConfigL.Lock()
-	defer sc.clientConfigL.Unlock()
-	if sc.client == nil || !reflect.DeepEqual(sc.lastConfig, cfg) {
-		sc.client = sc.newClient(cfg)
+	sc.clientConfigL.RLock()
+	shouldUpdate := sc.client == nil || sc.lastConfig.updated.Before(cfg.updated)
+	if shouldUpdate {
+		sc.clientConfigL.RUnlock()
+		sc.clientConfigL.Lock()
+		defer sc.clientConfigL.Unlock()
+		sc.client = sc.newClient(cfg.ClientConfig)
+		tcpClient := sc.newClient(cfg.ClientConfig)
+		tcpClient.Net = "tcp"
+		sc.tcpClient = tcpClient
 		sc.lastConfig = cfg
+	} else {
+		defer sc.clientConfigL.RUnlock()
 	}
 
-	return sc.client, sc.lastConfig, nil
+	return sc.client, sc.tcpClient, sc.lastConfig.ClientConfig, nil
 }
 
 func (sc *SRVClient) doExchange(c *dns.Client, fqdn, server string) (*dns.Msg, error) {
 	m := new(dns.Msg)
 	m.SetQuestion(fqdn, dns.TypeSRV)
-	if c.UDPSize != 0 {
+	var size uint16
+	if c.Net != "tcp" && c.UDPSize != 0 {
+		size = c.UDPSize
 		m.SetEdns0(c.UDPSize, false)
 	}
 
 	res, _, err := c.Exchange(m, server)
 	if err != nil {
-		// return the res also in case it was a truncation error
 		return res, err
 	}
-	if res.Rcode != dns.RcodeFormatError || c.UDPSize == 0 {
+	if res.Rcode != dns.RcodeFormatError || size == 0 {
 		return res, nil
 	}
 
@@ -166,7 +186,7 @@ func answersFromMsg(m *dns.Msg, replaceWithIPs bool) []*dns.SRV {
 }
 
 func (sc *SRVClient) lookupSRV(hostname string, replaceWithIPs bool) ([]*dns.SRV, error) {
-	c, cfg, err := sc.clientConfig()
+	c, tcpc, cfg, err := sc.clientConfig()
 	if err != nil {
 		return nil, err
 	}
@@ -175,13 +195,25 @@ func (sc *SRVClient) lookupSRV(hostname string, replaceWithIPs bool) ([]*dns.SRV
 	var res *dns.Msg
 	var tres *dns.Msg
 	for _, server := range cfg.Servers {
+		atomic.AddInt64(&sc.numUDPQueries, 1)
 		res, err = sc.doExchange(c, fqdn, server)
-		if err == dns.ErrTruncated && res != nil {
-			tres = res
-			continue
-		}
 		if err != nil || res == nil {
 			continue
+		}
+		if res.Truncated {
+			atomic.AddInt64(&sc.numTruncatedResponses, 1)
+			// store truncated in case TCP fails
+			tres = res
+			// try using TCP now
+			if !sc.IgnoreTruncated {
+				atomic.AddInt64(&sc.numTCPQueries, 1)
+				res, err = sc.doExchange(tcpc, fqdn, server)
+				if err != nil || res == nil {
+					continue
+				}
+			} else {
+				continue
+			}
 		}
 		// no error so stop
 		break
@@ -205,7 +237,6 @@ func (sc *SRVClient) lookupSRV(hostname string, replaceWithIPs bool) ([]*dns.SRV
 	// we check this AFTER the cache in case we have a better one in the cache
 	if res != nil && res.Rcode != dns.RcodeSuccess && tres != nil && tres.Rcode == dns.RcodeSuccess {
 		res = tres
-		err = dns.ErrTruncated
 	}
 
 	if res == nil {
@@ -248,7 +279,7 @@ func (sc *SRVClient) srv(hostname string, replaceWithIPs bool) (string, error) {
 
 	ans, err := sc.lookupSRV(hostname, replaceWithIPs)
 	// ignore truncated errors unless there were no answers
-	if err != nil && (err != dns.ErrTruncated || len(ans) == 0) {
+	if err != nil {
 		return "", err
 	}
 
@@ -301,6 +332,22 @@ func (sc *SRVClient) SRVNoPort(hostname string) (string, error) {
 	return host, err
 }
 
+// SRVStats contains lifetime counts for various statistics
+type SRVStats struct {
+	UDPQueries         int64
+	TCPQueries         int64
+	TruncatedResponses int64
+}
+
+// Stats returns the latest SRVStats struct for the given client
+func (sc *SRVClient) Stats() SRVStats {
+	return SRVStats{
+		UDPQueries:         atomic.LoadInt64(&sc.numUDPQueries),
+		TCPQueries:         atomic.LoadInt64(&sc.numTCPQueries),
+		TruncatedResponses: atomic.LoadInt64(&sc.numTruncatedResponses),
+	}
+}
+
 // AllSRV calls the AllSRV method on the DefaultSRVClient
 func AllSRV(hostname string) ([]string, error) {
 	return DefaultSRVClient.AllSRV(hostname)
@@ -319,8 +366,7 @@ func (sc *SRVClient) AllSRV(hostname string) ([]string, error) {
 	}
 
 	ans, err := sc.lookupSRV(hostname, false)
-	// ignore truncated errors unless there were no answers
-	if err != nil && (err != dns.ErrTruncated || len(ans) == 0) {
+	if err != nil {
 		return nil, err
 	}
 

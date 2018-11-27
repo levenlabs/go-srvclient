@@ -7,13 +7,18 @@ import (
 	"github.com/miekg/dns"
 )
 
+type clientConfig struct {
+	dns.ClientConfig
+	updated time.Time
+}
+
 const resolvFile = "/etc/resolv.conf"
 
 // go's net package used 5 seconds as its reload interval, we might as well too
 const reloadInterval = 5 * time.Second
 
 type dnsConfigGet struct {
-	cfg dns.ClientConfig
+	cfg clientConfig
 	err error
 }
 
@@ -36,7 +41,13 @@ func dnsConfigLoop() {
 		for i := range cfg.Servers {
 			cfg.Servers[i] = cfg.Servers[i] + ":" + cfg.Port
 		}
-		return dnsConfigGet{cfg: *cfg}
+
+		return dnsConfigGet{
+			cfg: clientConfig{
+				ClientConfig: *cfg,
+				updated:      time.Now(),
+			},
+		}
 	}
 
 	r := getConfig()
@@ -56,7 +67,7 @@ func dnsConfigLoop() {
 	}
 }
 
-func dnsGetConfig() (dns.ClientConfig, error) {
+func dnsGetConfig() (clientConfig, error) {
 	r := <-dnsConfigCh
 	return r.cfg, r.err
 }
