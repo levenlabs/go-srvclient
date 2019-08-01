@@ -278,8 +278,8 @@ func (sc *SRVClient) srv(hostname string, replaceWithIPs bool) (string, error) {
 	}
 
 	ans, err := sc.lookupSRV(hostname, replaceWithIPs)
-	// ignore truncated errors unless there were no answers
-	if err != nil {
+	// only return an error here if we also didn't get an answer
+	if len(ans) == 0 && err != nil {
 		return "", err
 	}
 
@@ -366,7 +366,8 @@ func (sc *SRVClient) AllSRV(hostname string) ([]string, error) {
 	}
 
 	ans, err := sc.lookupSRV(hostname, false)
-	if err != nil {
+	// only return an error here if we also didn't get an answer
+	if len(ans) == 0 && err != nil {
 		return nil, err
 	}
 

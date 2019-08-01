@@ -1,6 +1,7 @@
 package srvclient
 
 import (
+	"net"
 	. "testing"
 	"time"
 
@@ -260,19 +261,19 @@ func TestLastCache(t *T) {
 	assert.NotNil(t, err)
 	assert.IsType(t, &ErrNotFound{}, err)
 
-	cl.ResolverAddrs = nil
+	cl.ResolverAddrs = []string{"169.254.0.1:53"}
 	// force an update of the config
 	cl.lastConfig.updated = time.Time{}
 
 	r, err := cl.SRV(testHostname)
-	require.Nil(t, err)
+	require.NotNil(t, err)
 	assert.True(t, r == "10.0.0.1:1000" || r == "[2607:5300:60:92e7::1]:1001")
 	assert.Len(t, cl.cacheLast, 1)
 
 	cl.cacheLast = nil
 	_, err = cl.SRV(testHostname)
 	assert.NotNil(t, err)
-	assert.IsType(t, &ErrNotFound{}, err)
+	assert.IsType(t, &net.OpError{}, err)
 }
 
 func TestMaybeSRVURL(t *T) {
