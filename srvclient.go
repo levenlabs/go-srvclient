@@ -405,9 +405,16 @@ func (sc *SRVClient) MaybeSRV(host string) string {
 	return host
 }
 
+var (
+	randPool = sync.Pool{
+		New: func() interface{} {
+			return rand.New(rand.NewSource(time.Now().UnixNano()))
+		},
+	}
+)
+
 func pickSRV(srvs []*dns.SRV) *dns.SRV {
-	randSrc := rand.NewSource(time.Now().UnixNano())
-	rand := rand.New(randSrc)
+	rand := randPool.Get().(*rand.Rand)
 
 	lowPrio := srvs[0].Priority
 	picks := make([]*dns.SRV, 0, len(srvs))
