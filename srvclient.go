@@ -353,19 +353,19 @@ func AllSRV(hostname string) ([]string, error) {
 	return DefaultSRVClient.AllSRV(hostname)
 }
 
-// AllSRV returns the list of all hostnames and ports for the SRV lookup
-// The results are sorted by priority and then weight. Like SRV, if hostname
-// contained a port then the port on all results will be replaced with the
-// originally-passed port
-// AllSRV will NOT replace hostnames with their respective IPs
-func (sc *SRVClient) AllSRV(hostname string) ([]string, error) {
+// AllSRVTranslate calls the AllSRVTranslate method on the DefaultSRVClient
+func AllSRVTranslate(hostname string) ([]string, error) {
+	return DefaultSRVClient.AllSRVTranslate(hostname)
+}
+
+func (sc *SRVClient) allSRV(hostname string, translateIPs bool) ([]string, error) {
 	var ogPort string
 	if parts := strings.Split(hostname, ":"); len(parts) == 2 {
 		hostname = parts[0]
 		ogPort = parts[1]
 	}
 
-	ans, err := sc.lookupSRV(hostname, false)
+	ans, err := sc.lookupSRV(hostname, translateIPs)
 	// only return an error here if we also didn't get an answer
 	if len(ans) == 0 && err != nil {
 		return nil, err
@@ -386,6 +386,23 @@ func (sc *SRVClient) AllSRV(hostname string) ([]string, error) {
 		res[i] = srvToStr(ans[i], ogPort)
 	}
 	return res, err
+}
+
+// AllSRV returns the list of all hostnames and ports for the SRV lookup
+// The results are sorted by priority and then weight. Like SRV, if hostname
+// contained a port then the port on all results will be replaced with the
+// originally-passed port
+// AllSRV will NOT replace hostnames with their respective IPs
+func (sc *SRVClient) AllSRV(hostname string) ([]string, error) {
+	return sc.allSRV(hostname, false)
+}
+
+// AllSRVTranslate returns the list of all IPs and ports for the SRV lookup
+// The results are sorted by priority and then weight. Like SRV, if hostname
+// contained a port then the port on all results will be replaced with the
+// originally-passed port
+func (sc *SRVClient) AllSRVTranslate(hostname string) ([]string, error) {
+	return sc.allSRV(hostname, true)
 }
 
 // MaybeSRV calls the MaybeSRV method on the DefaultSRVClient
