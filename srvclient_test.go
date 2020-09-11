@@ -198,6 +198,20 @@ func TestAllSRV(t *T) {
 	assert.Contains(t, r, "2.srv.test.:9999")
 }
 
+func TestAllSRVTranslate(t *T) {
+	r, err := AllSRVTranslate(testHostname)
+	require.Nil(t, err)
+	assert.Len(t, r, 2)
+	assert.Contains(t, r, "10.0.0.1:1000")
+	assert.Contains(t, r, "[2607:5300:60:92e7::1]:1001")
+
+	r, err = AllSRVTranslate(testHostname + ":9999")
+	require.Nil(t, err)
+	assert.Len(t, r, 2)
+	assert.Contains(t, r, "10.0.0.1:9999")
+	assert.Contains(t, r, "[2607:5300:60:92e7::1]:9999")
+}
+
 func TestPickSRV(t *T) {
 	srvs := []*dns.SRV{
 		{Target: "a", Priority: 1, Weight: 100},
