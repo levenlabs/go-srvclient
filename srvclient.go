@@ -53,6 +53,9 @@ type SRVClient struct {
 	numUDPQueries         int64
 	numTCPQueries         int64
 	numTruncatedResponses int64
+	numExchangeErrors     int64
+	numCacheLastHits      int64
+	numCacheLastMisses    int64
 }
 
 // EnableCacheLast is used to make SRVClient cache the last successful SRV
@@ -92,6 +95,9 @@ func (sc *SRVClient) doCacheLast(hostname string, res *dns.Msg) *dns.Msg {
 		defer sc.cacheLastL.RUnlock()
 		if cres, ok := sc.cacheLast[hostname]; ok {
 			res = cres
+			atomic.AddInt64(&sc.numCacheLastHits, 1)
+		} else {
+			atomic.AddInt64(&sc.numCacheLastMisses, 1)
 		}
 		return res
 	}
@@ -198,6 +204,7 @@ func (sc *SRVClient) lookupSRV(hostname string, replaceWithIPs bool) ([]*dns.SRV
 		atomic.AddInt64(&sc.numUDPQueries, 1)
 		res, err = sc.doExchange(c, fqdn, server)
 		if err != nil || res == nil {
+			atomic.AddInt64(&sc.numExchangeErrors, 1)
 			continue
 		}
 		if res.Truncated {
@@ -209,6 +216,7 @@ func (sc *SRVClient) lookupSRV(hostname string, replaceWithIPs bool) ([]*dns.SRV
 				atomic.AddInt64(&sc.numTCPQueries, 1)
 				res, err = sc.doExchange(tcpc, fqdn, server)
 				if err != nil || res == nil {
+					atomic.AddInt64(&sc.numExchangeErrors, 1)
 					continue
 				}
 			} else {
@@ -337,6 +345,9 @@ type SRVStats struct {
 	UDPQueries         int64
 	TCPQueries         int64
 	TruncatedResponses int64
+	ExchangeErrors     int64
+	CacheLastHits      int64
+	CacheLastMisses    int64
 }
 
 // Stats returns the latest SRVStats struct for the given client
@@ -345,6 +356,9 @@ func (sc *SRVClient) Stats() SRVStats {
 		UDPQueries:         atomic.LoadInt64(&sc.numUDPQueries),
 		TCPQueries:         atomic.LoadInt64(&sc.numTCPQueries),
 		TruncatedResponses: atomic.LoadInt64(&sc.numTruncatedResponses),
+		ExchangeErrors:     atomic.LoadInt64(&sc.numExchangeErrors),
+		CacheLastHits:      atomic.LoadInt64(&sc.numCacheLastHits),
+		CacheLastMisses:    atomic.LoadInt64(&sc.numCacheLastMisses),
 	}
 }
 
