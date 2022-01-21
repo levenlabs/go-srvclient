@@ -1,7 +1,6 @@
 # go-srvclient
 
-A simple package for resolving SRV records being served by
-[skydns](https://github.com/skynetservices/skydns), according to the algorithm
+A simple package for resolving DNS SRV records, according to the algorithm
 set forth in that project's README. It simply takes in a hostname and does a SRV
 request against it. It wil then look at all the returned entries and make a
 weighted random choice of one of them, returning a string which is the
@@ -21,12 +20,12 @@ package main
 import "github.com/levenlabs/go-srvclient"
 
 func main() {
-	addr, err := srvclient.SRV("foo.skydns.local")
-	if err != nil {
-		fmt.Fatal(err)
-	}
+  addr, err := srvclient.SRV("foo.skydns.local")
+  if err != nil {
+    fmt.Fatal(err)
+  }
 
-	log.Printf("%s was chosen!", addr)
+  log.Printf("%s was chosen!", addr)
 }
 ```
 
@@ -35,7 +34,7 @@ func main() {
 This project also has an installable binary client which can be easily used. It
 can be installed with:
 
-    go get github.com/levenlabs/go-srvclient/srvclient
+    go install github.com/levenlabs/go-srvclient/srvclient
 
 And used like so:
 

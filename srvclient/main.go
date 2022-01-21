@@ -1,6 +1,7 @@
 package main
 
 import (
+	"flag"
 	"fmt"
 	"net"
 	"os"
@@ -8,35 +9,26 @@ import (
 	"time"
 
 	"github.com/levenlabs/go-srvclient"
-	"github.com/mediocregopher/lever"
 )
 
 func main() {
-	l := lever.New("srvclient", &lever.Opts{
-		HelpHeader:         "Usage: srvclient [options] <hostname>\n",
-		DisallowConfigFile: true,
-	})
-	l.Add(lever.Param{
-		Name:        "--resolvers",
-		Description: "Comma separated list of resolver ips or addresses (ip:port) which should be used instead of /etc/resolv.conf",
-	})
-	l.Add(lever.Param{
-		// this matches the flag for dig
-		Name:        "--ignore",
-		Description: "Whether to ignore truncated responses",
-		Flag:        true,
-	})
-	l.Parse()
-	argv := l.ParamRest()
+	flag.Usage = func() {
+		fmt.Fprintf(flag.CommandLine.Output(), "Usage: srvclient [options] <hostname>\n")
+		flag.PrintDefaults()
+	}
+	resolvers := flag.String("resolvers", "", "Comma separated list of resolver ips or addresses (ip:port) which should be used instead of /etc/resolv.conf")
+	// this matches the flag for dig
+	ignore := flag.Bool("ignore", false, "Whether to ignore truncated responses")
+	flag.Parse()
+	argv := flag.Args()
 
 	if len(argv) < 1 {
-		fmt.Print(l.Help())
+		flag.Usage()
 		exit(1)
 	}
 
 	sc := new(srvclient.SRVClient)
-	resolvers, _ := l.ParamStr("--resolvers")
-	for _, r := range strings.Split(resolvers, ",") {
+	for _, r := range strings.Split(*resolvers, ",") {
 		if net.ParseIP(r) != nil {
 			r += ":53"
 		}
@@ -45,8 +37,7 @@ func main() {
 		}
 	}
 
-	ignore := l.ParamFlag("--ignore")
-	if ignore {
+	if *ignore {
 		sc.IgnoreTruncated = true
 	}
 	r, err := sc.SRV(argv[0])

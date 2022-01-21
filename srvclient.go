@@ -291,6 +291,8 @@ func (sc *SRVClient) srv(hostname string, replaceWithIPs bool) (string, error) {
 		return "", err
 	}
 
+	// lookupSRV returns &ErrNotFound{hostname} if ans is empty so we MUST have at
+	// least 1 record here
 	srv := pickSRV(ans)
 
 	return srvToStr(srv, portStr), err
@@ -445,43 +447,40 @@ var (
 )
 
 func pickSRV(srvs []*dns.SRV) *dns.SRV {
-	rand := randPool.Get().(*rand.Rand)
-
 	lowPrio := srvs[0].Priority
 	picks := make([]*dns.SRV, 0, len(srvs))
 	weights := make([]int, 0, len(srvs))
+	var sum int
 
 	for i := range srvs {
 		if srvs[i].Priority < lowPrio {
 			picks = picks[:0]
 			weights = weights[:0]
+			sum = 0
 			lowPrio = srvs[i].Priority
 		}
-
 		if srvs[i].Priority == lowPrio {
 			picks = append(picks, srvs[i])
 			weights = append(weights, int(srvs[i].Weight))
+			sum += int(srvs[i].Weight)
 		}
 	}
 
-	sum := 0
-	for i := range weights {
-		sum += weights[i]
+	if len(picks) == 1 {
+		return picks[0]
 	}
 
-	if sum == 0 {
-		return picks[rand.Intn(len(picks))]
-	}
-
-	r := rand.Intn(sum)
-	for i := range weights {
-		r -= weights[i]
-		if r < 0 {
-			return picks[i]
+	if sum > 0 {
+		rand := randPool.Get().(*rand.Rand)
+		defer randPool.Put(rand)
+		r := rand.Intn(sum)
+		for i := range weights {
+			r -= weights[i]
+			if r < 0 {
+				return picks[i]
+			}
 		}
 	}
-
-	// We should never get here, just return the first pick
 	return picks[0]
 }
 
