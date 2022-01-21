@@ -1,5 +1,8 @@
 # go-srvclient
 
+[![GoDoc](https://godoc.org/github.com/levenlabs/go-srvclient?status.svg)](https://pkg.go.dev/github.com/levenlabs/go-srvclient)
+[![Report](https://goreportcard.com/badge/github.com/levenlabs/go-srvclient)](https://goreportcard.com/report/github.com/levenlabs/go-srvclient)
+
 A simple package for resolving DNS SRV records, according to the algorithm
 set forth in that project's README. It simply takes in a hostname and does a SRV
 request against it. It wil then look at all the returned entries and make a
