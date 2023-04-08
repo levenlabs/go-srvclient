@@ -26,14 +26,19 @@ func init() {
 // SRVClient is a holder for methods related to SRV lookups. Use new(SRVClient)
 // to initialize one.
 type SRVClient struct {
-	cacheLast  map[string]*dns.Msg
-	cacheLastL sync.RWMutex
-
+	cacheLast     map[string]*dns.Msg
+	cacheLastL    sync.RWMutex
 	client        *dns.Client
 	tcpClient     *dns.Client
 	lastConfig    clientConfig
 	clientConfigL sync.RWMutex
-	UDPSize       uint16
+
+	// OnExchangeError specifies an optional function to call for exchange errors
+	// that otherwise might be ignored if another server did not error.
+	OnExchangeError func(hostname string, server string, error error)
+
+	// UDPSize specifies the maximum receive buffer for UDP messages
+	UDPSize uint16
 
 	// If IgnoreTruncated is true, then lookups will NOT fallback to TCP when
 	// they were truncated over UDP.
@@ -163,6 +168,9 @@ func (sc *SRVClient) doExchange(c *dns.Client, fqdn, server string) (*dns.Msg, e
 
 	res, _, err := c.Exchange(m, server)
 	if err != nil {
+		if sc.OnExchangeError != nil {
+			sc.OnExchangeError(fqdn, server, err)
+		}
 		return res, err
 	}
 	if res.Rcode != dns.RcodeFormatError || size == 0 {
@@ -174,6 +182,11 @@ func (sc *SRVClient) doExchange(c *dns.Client, fqdn, server string) (*dns.Msg, e
 	m2 := new(dns.Msg)
 	m2.SetQuestion(fqdn, dns.TypeSRV)
 	res, _, err = c.Exchange(m2, server)
+	if err != nil {
+		if sc.OnExchangeError != nil {
+			sc.OnExchangeError(fqdn, server, err)
+		}
+	}
 	return res, err
 }
 
