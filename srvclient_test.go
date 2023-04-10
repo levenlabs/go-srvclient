@@ -1,8 +1,11 @@
 package srvclient
 
 import (
+	"context"
 	"net"
-	. "testing"
+	"sync"
+	"sync/atomic"
+	"testing"
 	"time"
 
 	"github.com/miekg/dns"
@@ -14,60 +17,60 @@ var testHostname = "srv.test.test"
 var testHostnameNoSRV = "test.test"
 var testHostnameTruncated = "trunc.test.test"
 
-func init() {
-	rr := func(s string) dns.RR {
-		m, _ := dns.NewRR(s)
-		return m
-	}
+func newRR(s string) dns.RR {
+	m, _ := dns.NewRR(s)
+	return m
+}
 
-	handleRequest := func(w dns.ResponseWriter, r *dns.Msg) {
+func handleRequest(w dns.ResponseWriter, r *dns.Msg) {
+	m := new(dns.Msg)
+	m.SetRcode(r, dns.RcodeSuccess)
+	if r.Question[0].Name == dns.Fqdn(testHostname) {
+		m.Answer = []dns.RR{
+			newRR("srv.test. 60 IN SRV 0 0 1000 1.srv.test."),
+			newRR("srv.test. 60 IN SRV 0 0 1001 2.srv.test."),
+		}
+		m.Extra = []dns.RR{
+			newRR("1.srv.test. 60 IN A 10.0.0.1"),
+			newRR("2.srv.test. 60 IN AAAA 2607:5300:60:92e7::1"),
+		}
+	} else if r.Question[0].Name == dns.Fqdn(testHostnameNoSRV) {
+		m.Answer = []dns.RR{
+			newRR("test.test. 60 IN A 11.0.0.1"),
+		}
+	} else if r.Question[0].Name == dns.Fqdn(testHostnameTruncated) {
+		m.Answer = []dns.RR{
+			newRR("srv.test. 60 IN SRV 0 0 1000 1.srv.test."),
+			newRR("srv.test. 60 IN SRV 0 0 1001 2.srv.test."),
+		}
+		m.Extra = []dns.RR{
+			newRR("1.srv.test. 60 IN A 10.0.0.1"),
+			newRR("2.srv.test. 60 IN AAAA 2607:5300:60:92e7::1"),
+		}
+		m.Truncated = true
+	}
+	w.WriteMsg(m)
+}
+
+func tcpHandleRequest(w dns.ResponseWriter, r *dns.Msg) {
+	if r.Question[0].Name == dns.Fqdn(testHostnameTruncated) {
 		m := new(dns.Msg)
 		m.SetRcode(r, dns.RcodeSuccess)
-		if r.Question[0].Name == dns.Fqdn(testHostname) {
-			m.Answer = []dns.RR{
-				rr("srv.test. 60 IN SRV 0 0 1000 1.srv.test."),
-				rr("srv.test. 60 IN SRV 0 0 1001 2.srv.test."),
-			}
-			m.Extra = []dns.RR{
-				rr("1.srv.test. 60 IN A 10.0.0.1"),
-				rr("2.srv.test. 60 IN AAAA 2607:5300:60:92e7::1"),
-			}
-		} else if r.Question[0].Name == dns.Fqdn(testHostnameNoSRV) {
-			m.Answer = []dns.RR{
-				rr("test.test. 60 IN A 11.0.0.1"),
-			}
-		} else if r.Question[0].Name == dns.Fqdn(testHostnameTruncated) {
-			m.Answer = []dns.RR{
-				rr("srv.test. 60 IN SRV 0 0 1000 1.srv.test."),
-				rr("srv.test. 60 IN SRV 0 0 1001 2.srv.test."),
-			}
-			m.Extra = []dns.RR{
-				rr("1.srv.test. 60 IN A 10.0.0.1"),
-				rr("2.srv.test. 60 IN AAAA 2607:5300:60:92e7::1"),
-			}
-			m.Truncated = true
+		m.Answer = []dns.RR{
+			newRR("srv.test. 60 IN SRV 0 0 1000 1.srv.test."),
+			newRR("srv.test. 60 IN SRV 0 0 1001 2.srv.test."),
+		}
+		m.Extra = []dns.RR{
+			newRR("1.srv.test. 60 IN A 10.0.0.2"),
+			newRR("2.srv.test. 60 IN AAAA 2607:5300:60:92e7::2"),
 		}
 		w.WriteMsg(m)
+		return
 	}
+	handleRequest(w, r)
+}
 
-	tcpHandleRequest := func(w dns.ResponseWriter, r *dns.Msg) {
-		if r.Question[0].Name == dns.Fqdn(testHostnameTruncated) {
-			m := new(dns.Msg)
-			m.SetRcode(r, dns.RcodeSuccess)
-			m.Answer = []dns.RR{
-				rr("srv.test. 60 IN SRV 0 0 1000 1.srv.test."),
-				rr("srv.test. 60 IN SRV 0 0 1001 2.srv.test."),
-			}
-			m.Extra = []dns.RR{
-				rr("1.srv.test. 60 IN A 10.0.0.2"),
-				rr("2.srv.test. 60 IN AAAA 2607:5300:60:92e7::2"),
-			}
-			w.WriteMsg(m)
-			return
-		}
-		handleRequest(w, r)
-	}
-
+func init() {
 	// start udp
 	server := &dns.Server{
 		Addr:    ":0",
@@ -117,7 +120,7 @@ func testDistr(srvs []*dns.SRV) map[string]int {
 	return m
 }
 
-func TestLookupSRV(t *T) {
+func TestLookupSRV(t *testing.T) {
 	assertHasSRV := func(host string, port int, srvs []*dns.SRV) {
 		found := false
 		for _, srv := range srvs {
@@ -129,90 +132,101 @@ func TestLookupSRV(t *T) {
 		assert.True(t, found)
 	}
 
-	rr, err := DefaultSRVClient.lookupSRV(testHostname, false)
-	require.Nil(t, err)
+	rr, err := DefaultSRVClient.lookupSRV(context.Background(), testHostname, false)
+	require.NoError(t, err)
 	assertHasSRV("1.srv.test.", 1000, rr)
 	assertHasSRV("2.srv.test.", 1001, rr)
 
-	rr, err = DefaultSRVClient.lookupSRV(testHostname, true)
-	require.Nil(t, err)
+	rr, err = DefaultSRVClient.lookupSRV(context.Background(), testHostname, true)
+	require.NoError(t, err)
 	assertHasSRV("10.0.0.1", 1000, rr)
 	assertHasSRV("2607:5300:60:92e7::1", 1001, rr)
 }
 
-func TestSRV(t *T) {
+func TestSRV(t *testing.T) {
 	r, err := SRV(testHostname)
-	require.Nil(t, err)
+	require.NoError(t, err)
 	assert.True(t, r == "10.0.0.1:1000" || r == "[2607:5300:60:92e7::1]:1001")
 
 	r, err = SRV(testHostname + ":9999")
-	require.Nil(t, err)
+	require.NoError(t, err)
 	assert.True(t, r == "10.0.0.1:9999" || r == "[2607:5300:60:92e7::1]:9999")
 
 	r, err = SRV("10.0.0.2:9999")
-	require.Nil(t, err)
+	require.NoError(t, err)
 	assert.Equal(t, "10.0.0.2:9999", r)
 }
 
-func TestSRVNoTranslate(t *T) {
+func TestSRVContext(t *testing.T) {
+	r, err := SRVContext(context.Background(), testHostname)
+	require.NoError(t, err)
+	assert.True(t, r == "10.0.0.1:1000" || r == "[2607:5300:60:92e7::1]:1001")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, err = SRVContext(ctx, testHostname)
+	assert.ErrorIs(t, err, context.Canceled)
+}
+
+func TestSRVNoTranslate(t *testing.T) {
 	r, err := SRVNoTranslate(testHostname)
-	require.Nil(t, err)
+	require.NoError(t, err)
 	assert.True(t, r == "1.srv.test.:1000" || r == "2.srv.test.:1001")
 
 	r, err = SRV("10.0.0.2:9999")
-	require.Nil(t, err)
+	require.NoError(t, err)
 	assert.Equal(t, "10.0.0.2:9999", r)
 }
 
-func TestSRVTruncated(t *T) {
+func TestSRVTruncated(t *testing.T) {
 	// these should hit local and then google but we should prefer local
 	DefaultSRVClient.IgnoreTruncated = true
 	r, err := SRV(testHostnameTruncated)
-	require.Nil(t, err)
+	require.NoError(t, err)
 	assert.True(t, r == "10.0.0.1:1000" || r == "[2607:5300:60:92e7::1]:1001")
 
 	// this should hit local over tcp and use that
 	DefaultSRVClient.IgnoreTruncated = false
 	r, err = SRV(testHostnameTruncated)
-	require.Nil(t, err)
+	require.NoError(t, err)
 	assert.True(t, r == "10.0.0.2:1000" || r == "[2607:5300:60:92e7::2]:1001")
 }
 
-func TestSRVNoPort(t *T) {
+func TestSRVNoPort(t *testing.T) {
 	r, err := SRVNoPort(testHostname)
-	require.Nil(t, err)
+	require.NoError(t, err)
 	assert.True(t, r == "10.0.0.1" || r == "2607:5300:60:92e7::1")
 }
 
-func TestAllSRV(t *T) {
+func TestAllSRV(t *testing.T) {
 	r, err := AllSRV(testHostname)
-	require.Nil(t, err)
+	require.NoError(t, err)
 	assert.Len(t, r, 2)
 	assert.Contains(t, r, "1.srv.test.:1000")
 	assert.Contains(t, r, "2.srv.test.:1001")
 
 	r, err = AllSRV(testHostname + ":9999")
-	require.Nil(t, err)
+	require.NoError(t, err)
 	assert.Len(t, r, 2)
 	assert.Contains(t, r, "1.srv.test.:9999")
 	assert.Contains(t, r, "2.srv.test.:9999")
 }
 
-func TestAllSRVTranslate(t *T) {
+func TestAllSRVTranslate(t *testing.T) {
 	r, err := AllSRVTranslate(testHostname)
-	require.Nil(t, err)
+	require.NoError(t, err)
 	assert.Len(t, r, 2)
 	assert.Contains(t, r, "10.0.0.1:1000")
 	assert.Contains(t, r, "[2607:5300:60:92e7::1]:1001")
 
 	r, err = AllSRVTranslate(testHostname + ":9999")
-	require.Nil(t, err)
+	require.NoError(t, err)
 	assert.Len(t, r, 2)
 	assert.Contains(t, r, "10.0.0.1:9999")
 	assert.Contains(t, r, "[2607:5300:60:92e7::1]:9999")
 }
 
-func TestPickSRV(t *T) {
+func TestPickSRV(t *testing.T) {
 	srvs := []*dns.SRV{
 		{Target: "a", Priority: 1, Weight: 100},
 		{Target: "b", Priority: 1, Weight: 100},
@@ -251,7 +265,7 @@ func TestPickSRV(t *T) {
 	}
 }
 
-func TestMaybeSRV(t *T) {
+func TestMaybeSRV(t *testing.T) {
 	r := MaybeSRV(testHostnameNoSRV)
 	assert.Equal(t, testHostnameNoSRV, r)
 
@@ -263,13 +277,13 @@ func TestMaybeSRV(t *T) {
 	assert.True(t, r == "10.0.0.1:1000" || r == "[2607:5300:60:92e7::1]:1001")
 }
 
-func TestLastCache(t *T) {
+func TestLastCache(t *testing.T) {
 	cl := new(SRVClient)
 	cl.EnableCacheLast()
 	cl.ResolverAddrs = DefaultSRVClient.ResolverAddrs
 
 	_, err := cl.SRV(testHostname)
-	require.Nil(t, err)
+	require.NoError(t, err)
 
 	_, err = cl.SRV("fail")
 	assert.NotNil(t, err)
@@ -290,7 +304,7 @@ func TestLastCache(t *T) {
 	assert.IsType(t, &net.OpError{}, err)
 }
 
-func TestMaybeSRVURL(t *T) {
+func TestMaybeSRVURL(t *testing.T) {
 	withScheme := "http://" + testHostnameNoSRV
 	r := MaybeSRVURL(withScheme)
 	assert.Equal(t, withScheme, r)
@@ -302,7 +316,7 @@ func TestMaybeSRVURL(t *T) {
 	assert.True(t, r == "http://10.0.0.1:1000" || r == "http://[2607:5300:60:92e7::1]:1001")
 }
 
-func TestPreprocess(t *T) {
+func TestPreprocess(t *testing.T) {
 	client := SRVClient{}
 	client.ResolverAddrs = DefaultSRVClient.ResolverAddrs
 	client.Preprocess = func(m *dns.Msg) {
@@ -310,7 +324,7 @@ func TestPreprocess(t *T) {
 	}
 
 	r, err := client.AllSRV(testHostname)
-	require.Nil(t, err)
+	require.NoError(t, err)
 	assert.Len(t, r, 1)
 	assert.Contains(t, r, "1.srv.test.:1000")
 
@@ -318,6 +332,99 @@ func TestPreprocess(t *T) {
 	assert.Equal(t, str, "10.0.0.1:1000")
 
 	str, err = client.SRVNoPort(testHostname)
-	require.Nil(t, err)
+	require.NoError(t, err)
 	assert.Equal(t, str, "10.0.0.1")
+}
+
+func TestSingleInFlight(t *testing.T) {
+	var count int64
+
+	waitCh := make(chan struct{})
+
+	// start udp
+	server := &dns.Server{
+		Addr: ":0",
+		Net:  "udp",
+		Handler: dns.HandlerFunc(func(w dns.ResponseWriter, r *dns.Msg) {
+			atomic.AddInt64(&count, 1)
+			<-waitCh
+			handleRequest(w, r)
+		}),
+	}
+	{
+		go func() {
+			panic(server.ListenAndServe())
+		}()
+		// give the goroutine a chance to start
+		<-time.After(100 * time.Millisecond)
+		// immediately call this again since this will block until the previous call
+		// is finished
+		server.ListenAndServe()
+	}
+
+	client := SRVClient{}
+	client.SingleInFlight = true
+	client.ResolverAddrs = []string{server.PacketConn.LocalAddr().String()}
+
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		r, err := client.AllSRV(testHostname)
+		require.NoError(t, err)
+		assert.Len(t, r, 2)
+		assert.Contains(t, r, "1.srv.test.:1000")
+		assert.Contains(t, r, "2.srv.test.:1001")
+	}()
+
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		r, err := client.SRV(testHostname)
+		require.NoError(t, err)
+		assert.True(t, r == "10.0.0.1:1000" || r == "[2607:5300:60:92e7::1]:1001")
+	}()
+
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		_, err := client.SRVContext(ctx, testHostname)
+		assert.Error(t, err, context.Canceled)
+	}()
+
+	select {
+	case waitCh <- struct{}{}:
+	}
+	wg.Wait()
+	assert.EqualValues(t, 1, atomic.LoadInt64(&count))
+	assert.EqualValues(t, 2, client.Stats().InFlightHits)
+
+	// make sure a context cancellation on the first one doesn't break the others
+	atomic.StoreInt64(&count, 0)
+	atomic.StoreInt64(&client.numInFlightHits, 0)
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		ctx, cancel := context.WithTimeout(context.Background(), time.Microsecond)
+		defer cancel()
+		_, err := client.SRVContext(ctx, testHostname)
+		assert.Error(t, err, context.Canceled)
+	}()
+
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		r, err := client.SRV(testHostname)
+		require.NoError(t, err)
+		assert.True(t, r == "10.0.0.1:1000" || r == "[2607:5300:60:92e7::1]:1001")
+	}()
+
+	select {
+	case waitCh <- struct{}{}:
+	}
+	wg.Wait()
+	assert.EqualValues(t, 1, atomic.LoadInt64(&count))
+	assert.EqualValues(t, 1, client.Stats().InFlightHits)
 }

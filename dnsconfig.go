@@ -51,12 +51,13 @@ func dnsConfigLoop() {
 	}
 
 	r := getConfig()
-	tick := time.Tick(reloadInterval)
+	tick := time.NewTicker(reloadInterval)
+	defer tick.Stop()
 	lastReload := time.Now()
 	for {
 		select {
 		case dnsConfigCh <- r:
-		case <-tick:
+		case <-tick.C:
 			if r.err == nil && !dnsShouldReload(lastReload) {
 				continue
 			}
