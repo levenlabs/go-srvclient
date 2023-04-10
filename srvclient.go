@@ -5,22 +5,29 @@ package srvclient
 // having to manually parse /etc/resolv.conf and manually make the SRV requests.
 
 import (
+	"context"
 	"errors"
+	"fmt"
 	"math/rand"
+	"net"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
-	"net"
-	"sort"
-
 	"github.com/miekg/dns"
 )
 
 func init() {
 	go dnsConfigLoop()
+}
+
+type inFlightRes struct {
+	msg  *dns.Msg
+	err  error
+	done chan struct{}
 }
 
 // SRVClient is a holder for methods related to SRV lookups. Use new(SRVClient)
@@ -32,10 +39,11 @@ type SRVClient struct {
 	tcpClient     *dns.Client
 	lastConfig    clientConfig
 	clientConfigL sync.RWMutex
+	inFlights     sync.Map
 
 	// OnExchangeError specifies an optional function to call for exchange errors
 	// that otherwise might be ignored if another server did not error.
-	OnExchangeError func(hostname string, server string, error error)
+	OnExchangeError func(ctx context.Context, hostname string, server string, error error)
 
 	// UDPSize specifies the maximum receive buffer for UDP messages
 	UDPSize uint16
@@ -55,12 +63,17 @@ type SRVClient struct {
 	// ip-replaced, etc...)
 	Preprocess func(*dns.Msg)
 
+	// SingleInFlight will combine duplicate lookups and only issue a single DNS
+	// query, mirroring the response to all callers.
+	SingleInFlight bool
+
 	numUDPQueries         int64
 	numTCPQueries         int64
 	numTruncatedResponses int64
 	numExchangeErrors     int64
 	numCacheLastHits      int64
 	numCacheLastMisses    int64
+	numInFlightHits       int64
 }
 
 // EnableCacheLast is used to make SRVClient cache the last successful SRV
@@ -120,7 +133,7 @@ func (sc *SRVClient) newClient(cfg dns.ClientConfig) *dns.Client {
 	} else {
 		c.UDPSize = dns.DefaultMsgSize
 	}
-	c.SingleInflight = true
+	// we don't use dns's SingleInFlight because of https://github.com/miekg/dns/issues/1449
 	if cfg.Timeout > 0 {
 		timeout := time.Duration(cfg.Timeout) * time.Second
 		c.DialTimeout = timeout
@@ -157,7 +170,7 @@ func (sc *SRVClient) clientConfig() (*dns.Client, *dns.Client, dns.ClientConfig,
 	return sc.client, sc.tcpClient, sc.lastConfig.ClientConfig, nil
 }
 
-func (sc *SRVClient) doExchange(c *dns.Client, fqdn, server string) (*dns.Msg, error) {
+func (sc *SRVClient) doExchange(ctx context.Context, c *dns.Client, fqdn, server string) (*dns.Msg, error) {
 	m := new(dns.Msg)
 	m.SetQuestion(fqdn, dns.TypeSRV)
 	var size uint16
@@ -166,10 +179,10 @@ func (sc *SRVClient) doExchange(c *dns.Client, fqdn, server string) (*dns.Msg, e
 		m.SetEdns0(c.UDPSize, false)
 	}
 
-	res, _, err := c.Exchange(m, server)
+	res, _, err := c.ExchangeContext(ctx, m, server)
 	if err != nil {
 		if sc.OnExchangeError != nil {
-			sc.OnExchangeError(fqdn, server, err)
+			sc.OnExchangeError(ctx, fqdn, server, err)
 		}
 		return res, err
 	}
@@ -181,41 +194,22 @@ func (sc *SRVClient) doExchange(c *dns.Client, fqdn, server string) (*dns.Msg, e
 	// edns0 isn't supported, so we try again without it
 	m2 := new(dns.Msg)
 	m2.SetQuestion(fqdn, dns.TypeSRV)
-	res, _, err = c.Exchange(m2, server)
+	res, _, err = c.ExchangeContext(ctx, m2, server)
 	if err != nil {
 		if sc.OnExchangeError != nil {
-			sc.OnExchangeError(fqdn, server, err)
+			sc.OnExchangeError(ctx, fqdn, server, err)
 		}
 	}
 	return res, err
 }
 
-func answersFromMsg(m *dns.Msg, replaceWithIPs bool) []*dns.SRV {
-	ans := make([]*dns.SRV, 0, len(m.Answer))
-	for i := range m.Answer {
-		if ansSRV, ok := m.Answer[i].(*dns.SRV); ok {
-			if replaceWithIPs {
-				// attempt to replace SRV's Target with the actual IP
-				ansSRV = replaceSRVTarget(ansSRV, m.Extra)
-			}
-			ans = append(ans, ansSRV)
-		}
-	}
-	return ans
-}
-
-func (sc *SRVClient) lookupSRV(hostname string, replaceWithIPs bool) ([]*dns.SRV, error) {
-	c, tcpc, cfg, err := sc.clientConfig()
-	if err != nil {
-		return nil, err
-	}
-
-	fqdn := dns.Fqdn(hostname)
+func (sc *SRVClient) innerLookupSRV(ctx context.Context, fqdn string, c, tcpc *dns.Client, cfg dns.ClientConfig) (*dns.Msg, error) {
 	var res *dns.Msg
 	var tres *dns.Msg
+	var err error
 	for _, server := range cfg.Servers {
 		atomic.AddInt64(&sc.numUDPQueries, 1)
-		res, err = sc.doExchange(c, fqdn, server)
+		res, err = sc.doExchange(ctx, c, fqdn, server)
 		if err != nil || res == nil {
 			atomic.AddInt64(&sc.numExchangeErrors, 1)
 			continue
@@ -227,7 +221,7 @@ func (sc *SRVClient) lookupSRV(hostname string, replaceWithIPs bool) ([]*dns.SRV
 			// try using TCP now
 			if !sc.IgnoreTruncated {
 				atomic.AddInt64(&sc.numTCPQueries, 1)
-				res, err = sc.doExchange(tcpc, fqdn, server)
+				res, err = sc.doExchange(ctx, tcpc, fqdn, server)
 				if err != nil || res == nil {
 					atomic.AddInt64(&sc.numExchangeErrors, 1)
 					continue
@@ -252,22 +246,100 @@ func (sc *SRVClient) lookupSRV(hostname string, replaceWithIPs bool) ([]*dns.SRV
 
 	// Handles caching this response if it's a successful one, or replacing res
 	// with the last response if not. Does nothing if sc.cacheLast is false.
-	res = sc.doCacheLast(hostname, res)
+	res = sc.doCacheLast(fqdn, res)
 
 	// if we got a truncated error from a server but it was a success, use it
 	// we check this AFTER the cache in case we have a better one in the cache
 	if res != nil && res.Rcode != dns.RcodeSuccess && tres != nil && tres.Rcode == dns.RcodeSuccess {
 		res = tres
+		// cache tres instead
+		res = sc.doCacheLast(fqdn, tres)
 	}
 
-	if res == nil {
+	return res, err
+}
+
+func answersFromMsg(m *dns.Msg, replaceWithIPs bool) []*dns.SRV {
+	ans := make([]*dns.SRV, 0, len(m.Answer))
+	for i := range m.Answer {
+		if ansSRV, ok := m.Answer[i].(*dns.SRV); ok {
+			if replaceWithIPs {
+				// attempt to replace SRV's Target with the actual IP
+				ansSRV = replaceSRVTarget(ansSRV, m.Extra)
+			}
+			ans = append(ans, ansSRV)
+		}
+	}
+	return ans
+}
+
+func cacheKey(fqdn string, cfg dns.ClientConfig) string {
+	return fmt.Sprintf("%s:%v", fqdn, cfg.Servers)
+}
+
+func (sc *SRVClient) lookupSRV(ctx context.Context, hostname string, replaceWithIPs bool) ([]*dns.SRV, error) {
+	c, tcpc, cfg, err := sc.clientConfig()
+	if err != nil {
+		return nil, err
+	}
+
+	fqdn := dns.Fqdn(hostname)
+
+	var msg *dns.Msg
+	if sc.SingleInFlight {
+		var res *inFlightRes
+		key := cacheKey(fqdn, cfg)
+		resi, loaded := sc.inFlights.Load(key)
+		if loaded {
+			res = resi.(*inFlightRes)
+		} else {
+			res = &inFlightRes{
+				done: make(chan struct{}),
+			}
+			resi, loaded = sc.inFlights.LoadOrStore(key, res)
+			if loaded {
+				res = resi.(*inFlightRes)
+			}
+		}
+		// if it wasn't loaded then we just stored the res and we should kick off the
+		// query
+		if !loaded {
+			do := func(ctx context.Context) {
+				defer close(res.done)
+				defer sc.inFlights.Delete(key)
+				res.msg, res.err = sc.innerLookupSRV(ctx, fqdn, c, tcpc, cfg)
+			}
+			// check for an empty context and we don't need to make a goroutine since
+			// we can rely on the context not being cancelled
+			if _, ok := ctx.Deadline(); !ok && ctx.Done() == nil {
+				do(ctx)
+			} else {
+				// otherwise we need to ignore cancellation and do it in a goroutine so
+				// that the outer request can respect the context
+				go do(withoutCancel{ctx})
+			}
+		} else {
+			atomic.AddInt64(&sc.numInFlightHits, 1)
+		}
+		select {
+		case <-ctx.Done():
+			err = ctx.Err()
+		case <-res.done:
+			msg = res.msg.Copy()
+			err = res.err
+		}
+	} else {
+		msg, err = sc.innerLookupSRV(ctx, fqdn, c, tcpc, cfg)
+	}
+
+	if msg == nil {
 		if err == nil {
 			err = errors.New("no available nameservers")
 		}
 		return nil, err
 	}
 
-	ans := answersFromMsg(res, replaceWithIPs)
+	ans := answersFromMsg(msg, replaceWithIPs)
 	if len(ans) == 0 {
 		return nil, &ErrNotFound{hostname}
 	}
@@ -282,12 +354,7 @@ func srvToStr(srv *dns.SRV, port string) string {
 	return net.JoinHostPort(srv.Target, port)
 }
 
-// SRV calls the SRV method on the DefaultSRVClient
-func SRV(hostname string) (string, error) {
-	return DefaultSRVClient.SRV(hostname)
-}
-
-func (sc *SRVClient) srv(hostname string, replaceWithIPs bool) (string, error) {
+func (sc *SRVClient) srv(ctx context.Context, hostname string, replaceWithIPs bool) (string, error) {
 	var portStr string
 	if h, p, _ := net.SplitHostPort(hostname); p != "" && h != "" {
 		// check for host being an IP and if so, just return what they sent
@@ -298,7 +365,7 @@ func (sc *SRVClient) srv(hostname string, replaceWithIPs bool) (string, error) {
 		portStr = p
 	}
 
-	ans, err := sc.lookupSRV(hostname, replaceWithIPs)
+	ans, err := sc.lookupSRV(ctx, hostname, replaceWithIPs)
 	// only return an error here if we also didn't get an answer
 	if len(ans) == 0 && err != nil {
 		return "", err
@@ -311,9 +378,24 @@ func (sc *SRVClient) srv(hostname string, replaceWithIPs bool) (string, error) {
 	return srvToStr(srv, portStr), err
 }
 
-// SRV will perform a SRV request on the given hostname, and then choose one of
-// the returned entries randomly based on the priority and weight fields it
-// sees. It will return the address ("host:port") of the winning entry, or an
+// SRV calls the SRV method on the DefaultSRVClient
+func SRV(hostname string) (string, error) {
+	return DefaultSRVClient.SRV(hostname)
+}
+
+// SRVContext calls the SRVContext method on the DefaultSRVClient
+func SRVContext(ctx context.Context, hostname string) (string, error) {
+	return DefaultSRVClient.SRVContext(ctx, hostname)
+}
+
+// SRV calls SRVContext with an empty context
+func (sc *SRVClient) SRV(hostname string) (string, error) {
+	return sc.SRVContext(context.Background(), hostname)
+}
+
+// SRVContext will perform a SRV request on the given hostname, and then choose
+// one of the returned entries randomly based on the priority and weight fields
+// it sees. It will return the address ("host:port") of the winning entry, or an
 // error if the query couldn't be made or it returned no entries. If the DNS
 // server provided the A records for the hosts, then the result will have the
 // target replaced with its respective IP.
@@ -323,8 +405,8 @@ func (sc *SRVClient) srv(hostname string, replaceWithIPs bool) (string, error) {
 //
 // If the given hostname is "ip:port", it'll just immediately return what you
 // sent.
-func (sc *SRVClient) SRV(hostname string) (string, error) {
-	return sc.srv(hostname, true)
+func (sc *SRVClient) SRVContext(ctx context.Context, hostname string) (string, error) {
+	return sc.srv(ctx, hostname, true)
 }
 
 // SRVNoTranslate calls the SRVNoTranslate method on the DefaultSRVClient
@@ -332,10 +414,21 @@ func SRVNoTranslate(hostname string) (string, error) {
 	return DefaultSRVClient.SRVNoTranslate(hostname)
 }
 
+// SRVNoTranslateContext calls the SRVNoTranslateContext method on the DefaultSRVClient
+func SRVNoTranslateContext(ctx context.Context, hostname string) (string, error) {
+	return DefaultSRVClient.SRVNoTranslateContext(ctx, hostname)
+}
+
 // SRVNoTranslate is exactly like SRV except it won't translate names to their
 // respective IPs
 func (sc *SRVClient) SRVNoTranslate(hostname string) (string, error) {
-	return sc.srv(hostname, false)
+	return sc.SRVNoTranslateContext(context.Background(), hostname)
+}
+
+// SRVNoTranslateContext is exactly like SRVContext except it won't translate
+// names to their respective IPs
+func (sc *SRVClient) SRVNoTranslateContext(ctx context.Context, hostname string) (string, error) {
+	return sc.srv(ctx, hostname, false)
 }
 
 // SRVNoPort calls the SRVNoPort method on the DefaultSRVClient
@@ -343,10 +436,21 @@ func SRVNoPort(hostname string) (string, error) {
 	return DefaultSRVClient.SRVNoPort(hostname)
 }
 
+// SRVNoPortContext calls the SRVNoPortContext method on the DefaultSRVClient
+func SRVNoPortContext(ctx context.Context, hostname string) (string, error) {
+	return DefaultSRVClient.SRVNoPortContext(ctx, hostname)
+}
+
 // SRVNoPort behaves the same as SRV, but the returned address string will not
 // contain the port
 func (sc *SRVClient) SRVNoPort(hostname string) (string, error) {
-	addr, err := sc.SRV(hostname)
+	return sc.SRVNoPortContext(context.Background(), hostname)
+}
+
+// SRVNoPortContext behaves the same as SRVContext, but the returned address string
+// will not contain the port
+func (sc *SRVClient) SRVNoPortContext(ctx context.Context, hostname string) (string, error) {
+	addr, err := sc.SRVContext(ctx, hostname)
 	if err != nil {
 		return "", err
 	}
@@ -363,6 +467,7 @@ type SRVStats struct {
 	ExchangeErrors     int64
 	CacheLastHits      int64
 	CacheLastMisses    int64
+	InFlightHits       int64
 }
 
 // Stats returns the latest SRVStats struct for the given client
@@ -374,6 +479,7 @@ func (sc *SRVClient) Stats() SRVStats {
 		ExchangeErrors:     atomic.LoadInt64(&sc.numExchangeErrors),
 		CacheLastHits:      atomic.LoadInt64(&sc.numCacheLastHits),
 		CacheLastMisses:    atomic.LoadInt64(&sc.numCacheLastMisses),
+		InFlightHits:       atomic.LoadInt64(&sc.numInFlightHits),
 	}
 }
 
@@ -382,19 +488,30 @@ func AllSRV(hostname string) ([]string, error) {
 	return DefaultSRVClient.AllSRV(hostname)
 }
 
+// AllSRVContext calls the AllSRVContext method on the DefaultSRVClient
+func AllSRVContext(ctx context.Context, hostname string) ([]string, error) {
+	return DefaultSRVClient.AllSRVContext(ctx, hostname)
+}
+
 // AllSRVTranslate calls the AllSRVTranslate method on the DefaultSRVClient
 func AllSRVTranslate(hostname string) ([]string, error) {
 	return DefaultSRVClient.AllSRVTranslate(hostname)
 }
 
-func (sc *SRVClient) allSRV(hostname string, translateIPs bool) ([]string, error) {
+// AllSRVTranslateContext calls the AllSRVTranslateContext method on the
+// DefaultSRVClient
+func AllSRVTranslateContext(ctx context.Context, hostname string) ([]string, error) {
+	return DefaultSRVClient.AllSRVTranslateContext(ctx, hostname)
+}
+
+func (sc *SRVClient) allSRV(ctx context.Context, hostname string, translateIPs bool) ([]string, error) {
 	var ogPort string
 	if parts := strings.Split(hostname, ":"); len(parts) == 2 {
 		hostname = parts[0]
 		ogPort = parts[1]
 	}
 
-	ans, err := sc.lookupSRV(hostname, translateIPs)
+	ans, err := sc.lookupSRV(ctx, hostname, translateIPs)
 	// only return an error here if we also didn't get an answer
 	if len(ans) == 0 && err != nil {
 		return nil, err
@@ -417,21 +534,31 @@ func (sc *SRVClient) allSRV(hostname string, translateIPs bool) ([]string, error
 	return res, err
 }
 
-// AllSRV returns the list of all hostnames and ports for the SRV lookup
+// AllSRV calls AllSRVContext with an empty context
+func (sc *SRVClient) AllSRV(hostname string) ([]string, error) {
+	return sc.AllSRVContext(context.Background(), hostname)
+}
+
+// AllSRVContext returns the list of all hostnames and ports for the SRV lookup
 // The results are sorted by priority and then weight. Like SRV, if hostname
 // contained a port then the port on all results will be replaced with the
 // originally-passed port
 // AllSRV will NOT replace hostnames with their respective IPs
-func (sc *SRVClient) AllSRV(hostname string) ([]string, error) {
-	return sc.allSRV(hostname, false)
+func (sc *SRVClient) AllSRVContext(ctx context.Context, hostname string) ([]string, error) {
+	return sc.allSRV(ctx, hostname, false)
 }
 
-// AllSRVTranslate returns the list of all IPs and ports for the SRV lookup
+// AllSRVTranslate calls AllSRVTranslateContext with an empty context
+func (sc *SRVClient) AllSRVTranslate(hostname string) ([]string, error) {
+	return sc.AllSRVTranslateContext(context.Background(), hostname)
+}
+
+// AllSRVTranslateContext returns the list of all IPs and ports for the SRV lookup
 // The results are sorted by priority and then weight. Like SRV, if hostname
 // contained a port then the port on all results will be replaced with the
 // originally-passed port
-func (sc *SRVClient) AllSRVTranslate(hostname string) ([]string, error) {
-	return sc.allSRV(hostname, true)
+func (sc *SRVClient) AllSRVTranslateContext(ctx context.Context, hostname string) ([]string, error) {
+	return sc.allSRV(ctx, hostname, true)
 }
 
 // MaybeSRV calls the MaybeSRV method on the DefaultSRVClient
@@ -439,12 +566,17 @@ func MaybeSRV(host string) string {
 	return DefaultSRVClient.MaybeSRV(host)
 }
 
-// MaybeSRV attempts a SRV lookup if the host doesn't contain a port and if the
-// SRV lookup succeeds it'll rewrite the host and return it with the lookup
-// result. If it fails it'll just return the host originally sent
+// MaybeSRV calls MaybeSRVContext with an empty context
 func (sc *SRVClient) MaybeSRV(host string) string {
+	return sc.MaybeSRVContext(context.Background(), host)
+}
+
+// MaybeSRVContext attempts a SRV lookup if the host doesn't contain a port and
+// if the SRV lookup succeeds it'll rewrite the host and return it with the
+// lookup result. If it fails it'll just return the host originally sent
+func (sc *SRVClient) MaybeSRVContext(ctx context.Context, host string) string {
 	if _, p, _ := net.SplitHostPort(host); p == "" {
-		if addr, err := sc.SRV(host); err == nil {
+		if addr, err := sc.SRVContext(ctx, host); err == nil {
 			host = addr
 		}
 	}
@@ -502,9 +634,20 @@ func MaybeSRVURL(host string) string {
 	return DefaultSRVClient.MaybeSRVURL(host)
 }
 
-// MaybeSRVURL calls MaybeSRV and also prepends http:// if no scheme was sent
+// MaybeSRVURLContext calls the MaybeSRVURLContext method on the DefaultSRVClient
+func MaybeSRVURLContext(ctx context.Context, host string) string {
+	return DefaultSRVClient.MaybeSRVURLContext(ctx, host)
+}
+
+// MaybeSRVURL calls MaybeSRVURLContext with an empty context
 func (sc *SRVClient) MaybeSRVURL(host string) string {
-	host = sc.MaybeSRV(host)
+	return sc.MaybeSRVURLContext(context.Background(), host)
+}
+
+// MaybeSRVURLContext calls MaybeSRVContext and also prepends http:// if no
+// scheme was sent
+func (sc *SRVClient) MaybeSRVURLContext(ctx context.Context, host string) string {
+	host = sc.MaybeSRVContext(ctx, host)
 	if !strings.Contains(host, "://") {
 		return "http://" + host
 	}

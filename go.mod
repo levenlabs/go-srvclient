@@ -7,6 +7,5 @@ require (
 	github.com/miekg/dns v1.1.53
 	github.com/stretchr/testify v1.7.0
 	golang.org/x/tools v0.8.0 // indirect
-	golang.org/x/xerrors v0.0.0-20220907171357-04be3eba64a2 // indirect
 	gopkg.in/yaml.v3 v3.0.0-20210107192922-496545a6307b // indirect
 )
