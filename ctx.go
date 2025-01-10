@@ -18,6 +18,8 @@ type withoutCancel struct {
 // this will overwrite the Deadline method to return no deadline so if you
 // call WithTimeout/WithDeadline it'll use the new value and not retain
 // the parent one if its sooner.
+//
+// Deprecated: use context.WithoutCancel instead.
 func WithoutCancel(ctx context.Context) context.Context {
 	return withoutCancel{ctx}
 }

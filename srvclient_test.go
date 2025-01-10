@@ -132,12 +132,12 @@ func TestLookupSRV(t *testing.T) {
 		assert.True(t, found)
 	}
 
-	rr, err := DefaultSRVClient.lookupSRV(context.Background(), testHostname, false)
+	rr, err := DefaultSRVClient.lookupSRV(context.Background(), testHostname, false, false)
 	require.NoError(t, err)
 	assertHasSRV("1.srv.test.", 1000, rr)
 	assertHasSRV("2.srv.test.", 1001, rr)
 
-	rr, err = DefaultSRVClient.lookupSRV(context.Background(), testHostname, true)
+	rr, err = DefaultSRVClient.lookupSRV(context.Background(), testHostname, true, false)
 	require.NoError(t, err)
 	assertHasSRV("10.0.0.1", 1000, rr)
 	assertHasSRV("2607:5300:60:92e7::1", 1001, rr)
@@ -298,8 +298,16 @@ func TestLastCache(t *testing.T) {
 	assert.True(t, r == "10.0.0.1:1000" || r == "[2607:5300:60:92e7::1]:1001")
 	assert.Len(t, cl.cacheLast, 1)
 
-	cl.cacheLast = nil
-	_, err = cl.SRV(testHostname)
+	// we don't cache not found errors
+	_, err = cl.SRV("fail")
+	assert.NotNil(t, err)
+	assert.IsType(t, &net.OpError{}, err)
+
+	_, err = cl.SRVNoCacheContext(context.Background(), testHostname)
+	assert.NotNil(t, err)
+	assert.IsType(t, &net.OpError{}, err)
+
+	_, err = cl.AllSRVNoCacheContext(context.Background(), testHostname)
 	assert.NotNil(t, err)
 	assert.IsType(t, &net.OpError{}, err)
 }
@@ -394,9 +402,7 @@ func TestSingleInFlight(t *testing.T) {
 		assert.Error(t, err, context.Canceled)
 	}()
 
-	select {
-	case waitCh <- struct{}{}:
-	}
+	waitCh <- struct{}{}
 	wg.Wait()
 	assert.EqualValues(t, 1, atomic.LoadInt64(&count))
 	assert.EqualValues(t, 2, client.Stats().InFlightHits)
@@ -421,9 +427,7 @@ func TestSingleInFlight(t *testing.T) {
 		assert.True(t, r == "10.0.0.1:1000" || r == "[2607:5300:60:92e7::1]:1001")
 	}()
 
-	select {
-	case waitCh <- struct{}{}:
-	}
+	waitCh <- struct{}{}
 	wg.Wait()
 	assert.EqualValues(t, 1, atomic.LoadInt64(&count))
 	assert.EqualValues(t, 1, client.Stats().InFlightHits)
