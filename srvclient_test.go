@@ -431,4 +431,7 @@ func TestSingleInFlight(t *testing.T) {
 	wg.Wait()
 	assert.EqualValues(t, 1, atomic.LoadInt64(&count))
 	assert.EqualValues(t, 1, client.Stats().InFlightHits)
+
+	_, err := client.SRVNoCacheContext(context.Background(), "fail")
+	assert.NotNil(t, err)
 }

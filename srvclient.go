@@ -329,7 +329,9 @@ func (sc *SRVClient) lookupSRV(ctx context.Context, hostname string, replaceWith
 		case <-ctx.Done():
 			err = ctx.Err()
 		case <-res.done:
-			msg = res.msg.Copy()
+			if res.msg != nil {
+				msg = res.msg.Copy()
+			}
 			err = res.err
 		}
 	} else {
